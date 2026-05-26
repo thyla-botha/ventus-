@@ -259,4 +259,71 @@ describe('FileRunStore', () => {
       expect(all).toHaveLength(20);
     });
   });
+
+  describe('reapIfStale', () => {
+    const completion = { status: 'failed' as const, errorText: 'no heartbeat' };
+
+    it('throws on malformed staleAsOf rather than silently authorising a reap', async () => {
+      // NaN watermark would make the row-timestamp comparison always false
+      // (referenceMs > NaN === false), opening the door to reaping every
+      // running row. We'd rather surface the bug than kill live work.
+      const r = await store.create(input());
+      await expect(
+        store.reapIfStale(r.id, { staleAsOf: 'not-a-date', completion }),
+      ).rejects.toThrow(/malformed staleAsOf/);
+      const after = await store.get(r.id);
+      expect(after?.status).toBe('running');
+    });
+
+    it('throws when the row carries a malformed liveness timestamp', async () => {
+      // Corrupt the on-disk JSON to simulate data damage. A garbage timestamp
+      // is a data integrity bug — surface it instead of treating it as
+      // "infinitely stale".
+      const r = await store.create(input());
+      await store.heartbeat(r.id, 'not-a-real-iso');
+      await expect(
+        store.reapIfStale(r.id, {
+          staleAsOf: new Date().toISOString(),
+          completion,
+        }),
+      ).rejects.toThrow(/malformed liveness timestamp/);
+    });
+
+    it('returns null when the row is no longer running', async () => {
+      const r = await store.create(input());
+      await store.complete(r.id, { status: 'completed', finalText: 'ok' });
+      const out = await store.reapIfStale(r.id, {
+        staleAsOf: new Date().toISOString(),
+        completion,
+      });
+      expect(out).toBeNull();
+    });
+
+    it('returns null when a fresh heartbeat has landed past the watermark', async () => {
+      const r = await store.create(input());
+      await store.heartbeat(r.id, new Date().toISOString());
+      // Watermark in the past; current heartbeat is "newer" than stale window.
+      const out = await store.reapIfStale(r.id, {
+        staleAsOf: new Date(Date.now() - 60_000).toISOString(),
+        completion,
+      });
+      expect(out).toBeNull();
+      const after = await store.get(r.id);
+      expect(after?.status).toBe('running');
+    });
+
+    it('reaps when row is still running and reference timestamp is at/below watermark', async () => {
+      const r = await store.create(input());
+      const old = new Date(Date.now() - 5 * 60_000).toISOString();
+      await store.heartbeat(r.id, old);
+      const reaped = await store.reapIfStale(r.id, {
+        staleAsOf: new Date().toISOString(),
+        completion: { ...completion, haltReason: 'reaper_stale_heartbeat' },
+      });
+      expect(reaped?.status).toBe('failed');
+      expect(reaped?.haltReason).toBe('reaper_stale_heartbeat');
+      // Evidence preserved: original stale heartbeat timestamp not touched.
+      expect(reaped?.lastHeartbeatAt).toBe(old);
+    });
+  });
 });

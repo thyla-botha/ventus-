@@ -78,6 +78,9 @@ importers:
       '@ventus/store':
         specifier: workspace:*
         version: link:../../packages/store
+      '@ventus/worker':
+        specifier: workspace:*
+        version: link:../worker
       hono:
         specifier: ^4.6.0
         version: 4.12.23

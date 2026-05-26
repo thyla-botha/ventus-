@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./reaper": "./src/reaper.ts"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "reaper:dev": "tsx watch src/reaper-main.ts",

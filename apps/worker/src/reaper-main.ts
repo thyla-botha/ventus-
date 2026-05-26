@@ -4,9 +4,24 @@ import { fileURLToPath } from 'node:url';
 import { FileRunStore } from '@ventus/store';
 import { startReaper } from './reaper.js';
 
-// Standalone reaper entry point. Run with `pnpm --filter @ventus/worker reaper:dev`.
-// Reads the same env vars as the API so dev workflows share one .ventus/ dir
-// without any extra wiring. Add to systemd / Fly's process model in prod.
+// Standalone reaper entry point — ADVANCED OPT-IN ONLY.
+//
+// The API process (apps/api/src/index.ts) starts an in-process reaper by
+// default. That is the correct mode: heartbeat writes and reap writes share
+// the same FileRunStore writeLock, which is what makes reapIfStale's
+// compare-and-set actually atomic.
+//
+// Running this file alongside the API on the SAME file store reopens the
+// heartbeat/reaper race because the two processes hold independent in-memory
+// locks on the same JSON file (last-writer-wins on the on-disk row). DO NOT
+// run both pointing at the same VENTUS_RUN_STORE.
+//
+// Legitimate uses for this entrypoint:
+//   - Testing the reaper in isolation against a private VENTUS_RUN_STORE path
+//   - Future Postgres deployment where atomicity moves to the database
+//     (single conditional UPDATE) and the API no longer needs to host the
+//     reaper. At that point, drop the API's startReaper() call and run this
+//     as a sidecar.
 
 function findWorkspaceRoot(start: string): string {
   let dir = start;

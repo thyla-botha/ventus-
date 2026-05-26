@@ -19,6 +19,7 @@
     "@ventus/store": "workspace:*",
     "@ventus/skills": "workspace:*",
     "@ventus/agent-runtime": "workspace:*",
+    "@ventus/worker": "workspace:*",
     "hono": "^4.6.0",
     "@hono/node-server": "^1.13.0",
     "@supabase/supabase-js": "^2.45.0",

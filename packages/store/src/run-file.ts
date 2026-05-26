@@ -181,6 +181,12 @@ export class FileRunStore implements RunStore {
     // running" — protecting a live loop from being killed by a snapshot
     // that lost a race.
     const staleAsOfMs = new Date(opts.staleAsOf).getTime();
+    // Defensive: a NaN watermark would make the row-timestamp comparison
+    // (`reference > staleAsOfMs`) always false, silently authorising every
+    // reap. Refuse to act rather than guess.
+    if (!Number.isFinite(staleAsOfMs)) {
+      throw new Error(`reapIfStale: malformed staleAsOf=${opts.staleAsOf}`);
+    }
     let result: RunRecord | null | undefined;
     const next = this.writeLock.then(async () => {
       const state = await this.load();
@@ -195,7 +201,16 @@ export class FileRunStore implements RunStore {
         return;
       }
       const reference = current.lastHeartbeatAt ?? current.startedAt;
-      if (new Date(reference).getTime() > staleAsOfMs) {
+      const referenceMs = new Date(reference).getTime();
+      // A row with garbage timestamps is a data integrity bug, not a stale
+      // run. Reaping it would obscure the underlying corruption; surface it
+      // to the caller (the reaper logs + skips it).
+      if (!Number.isFinite(referenceMs)) {
+        throw new Error(
+          `reapIfStale: malformed liveness timestamp on run ${id} (lastHeartbeatAt=${current.lastHeartbeatAt}, startedAt=${current.startedAt})`,
+        );
+      }
+      if (referenceMs > staleAsOfMs) {
         // A fresh heartbeat landed between the reaper's snapshot and now —
         // the loop is alive. Don't reap.
         result = null;

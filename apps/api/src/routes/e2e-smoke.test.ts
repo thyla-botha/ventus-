@@ -14,11 +14,14 @@ import { readJson } from '../test-helpers.js';
 // proposal through decide → execute via the HTTP surface, and asserts the
 // audit trail captures every step in order.
 //
-// This is the test we WOULD have run before declaring the platform shippable.
-// It deliberately uses zero internal store/audit/runtime mocking — only the
-// LLM is faked (because Anthropic isn't a deterministic test fixture). Every
-// other layer (state singleton, file stores, executor registry, HTTP middleware
-// chain, audit hashing) is the same one production runs.
+// Scope of mocking: the entire AgentRuntime is substituted (not just the LLM
+// call). Every OTHER layer is the same code production runs — state singleton,
+// file stores, proposal tool dispatch, executor registry, audit hashing, HTTP
+// middleware chain. Bugs covered: route wiring, tenant scoping, audit ordering,
+// outbox shape, run-row lifecycle. Bugs NOT covered by this test (and that need
+// separate AnthropicRuntime-level coverage): provider event translation,
+// tool-result encoding, stop-reason interpretation, conversation history
+// rebuilds, and any drift between FakeAgentRuntime's contract and the real one.
 
 const TENANT = '00000000-0000-0000-0000-00000000000a';
 const USER = '00000000-0000-0000-0000-000000000111';

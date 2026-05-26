@@ -8,9 +8,9 @@ import { getAppState } from './state.js';
 // reapIfStale's compare-and-set actually atomic. Running it as a separate
 // process (apps/worker/src/reaper-main.ts) reopens the heartbeat/reaper race
 // because the two processes hold independent in-memory locks on the same
-// JSON file. reaper-main.ts is preserved as an advanced opt-in for testing
-// the reaper in isolation, but production should rely on this in-process
-// instance.
+// JSON file. reaper-main.ts is preserved as an advanced opt-in (gated by
+// VENTUS_REAPER_STANDALONE=1) for testing the reaper in isolation; production
+// should rely on this in-process instance.
 //
 // Knobs share env vars with reaper-main so the dev story stays consistent.
 const STALE_MS = parseEnvNumber('VENTUS_REAPER_STALE_MS', 60_000);
@@ -38,17 +38,42 @@ const reaperHandle = startReaper(
   { staleThresholdMs: STALE_MS, pollIntervalMs: POLL_MS },
 );
 
-const shutdown = async (signal: string) => {
-  // eslint-disable-next-line no-console
-  console.log(`ventus api: received ${signal}, draining`);
-  // Stop accepting new connections first so drainInflight sees a stable set
-  // of in-flight loops.
-  server.close();
-  await reaperHandle.stop();
-  await getAppState().drainInflight();
-  // eslint-disable-next-line no-console
-  console.log('ventus api: shutdown complete');
-  process.exit(0);
+// Idempotent shutdown. SIGINT and SIGTERM can both fire (e.g. Ctrl-C followed
+// by a supervisor SIGTERM). Without the latch we'd re-await server.close on
+// an already-closing server and double-call reaperHandle.stop. Also crucial
+// during tests/process managers that send multiple signals in a graceful
+// shutdown window.
+let shuttingDown: Promise<void> | null = null;
+
+const shutdown = (signal: string): Promise<void> => {
+  if (shuttingDown) return shuttingDown;
+  shuttingDown = (async () => {
+    // eslint-disable-next-line no-console
+    console.log(`ventus api: received ${signal}, draining`);
+    // Step 1: stop accepting new connections. AWAIT the close — the @hono/node-server
+    // serve() returns the underlying Node http.Server, whose close() callback
+    // only fires once all in-flight requests have settled. Skipping the await
+    // means process.exit could cut active responses mid-write and skip
+    // drainInflight's snapshot for late arrivals.
+    await new Promise<void>((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve()));
+    });
+    // Step 2: stop the reaper. Its own stop() drains an in-flight tick before
+    // resolving, so no further reap-writes land after this awaits.
+    await reaperHandle.stop();
+    // Step 3: drain any agent loops that the now-closed server kicked off
+    // before close. drainInflight settles each tracked loop to its terminal
+    // Run row, so no orphan 'running' rows leak across the restart.
+    await getAppState().drainInflight();
+    // eslint-disable-next-line no-console
+    console.log('ventus api: shutdown complete');
+    process.exit(0);
+  })().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error('ventus api: shutdown failed', err);
+    process.exit(1);
+  });
+  return shuttingDown;
 };
 
 process.on('SIGINT', () => void shutdown('SIGINT'));

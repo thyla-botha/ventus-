@@ -34,6 +34,22 @@ function findWorkspaceRoot(start: string): string {
   return start;
 }
 
+// Fail-closed guard: this entrypoint reopens the heartbeat/reaper race when
+// run alongside the API on the same VENTUS_RUN_STORE (see the header
+// comment). Require explicit opt-in so accidental invocation by a process
+// supervisor or muscle memory crashes loudly rather than silently corrupting
+// liveness state. The lockfile we'd ideally take here is deferred — the env
+// gate is the cheap, sufficient mitigation.
+if (process.env.VENTUS_REAPER_STANDALONE !== '1') {
+  // eslint-disable-next-line no-console
+  console.error(
+    'reaper-main: refusing to start. The API process now runs the reaper in-process; running this entrypoint against the same VENTUS_RUN_STORE will reopen the heartbeat/reaper race.\n' +
+      '\n' +
+      'If you genuinely need the standalone reaper (e.g. isolation testing against a private run-store path), set VENTUS_REAPER_STANDALONE=1.',
+  );
+  process.exit(2);
+}
+
 const ROOT = findWorkspaceRoot(dirname(fileURLToPath(import.meta.url)));
 const RUN_STORE_PATH = process.env.VENTUS_RUN_STORE
   ? resolve(process.env.VENTUS_RUN_STORE)

@@ -88,8 +88,17 @@ export class FileAuditStore implements AuditStore {
 
   async listAuditTrail(filter: AuditTrailFilter): Promise<AuditTrailRow[]> {
     const state = await this.load();
+    // Tenant-scope the outcome map BEFORE the join. An outcome row whose
+    // tenantId differs from the requested tenant must not be paired with a
+    // tenant-scoped intent, even if intentIds collide (UUIDs make this
+    // unlikely but the isolation invariant must not depend on that). Codex
+    // flagged: under Postgres+RLS this would be enforced by the policy, but
+    // on the file store the map is built in JS so we have to scope manually.
     const outcomesByIntent = new Map<string, AuditOutcomeRecord>();
-    for (const o of state.outcomes) outcomesByIntent.set(o.intentId, o);
+    for (const o of state.outcomes) {
+      if (o.tenantId !== filter.tenantId) continue;
+      outcomesByIntent.set(o.intentId, o);
+    }
 
     let intents = state.intents.filter((i) => i.tenantId === filter.tenantId);
     if (filter.resourceType !== undefined) {

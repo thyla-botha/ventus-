@@ -304,3 +304,343 @@ describe('GET /v1/runs/:id/audit', () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe('GET /v1/runs/:id/reconcile', () => {
+  // Helper: write an intent (and optionally a matching outcome) directly into
+  // the audit store for the harness. Lets tests construct precise orphan /
+  // non-orphan scenarios without driving the full executor path.
+  async function writeAuditPair(
+    runId: string,
+    action: string,
+    opts: {
+      withOutcome?: boolean;
+      actorType?: 'user' | 'agent' | 'system';
+      resourceId?: string;
+    } = {},
+  ) {
+    const { FileAuditStore } = await import('@ventus/store');
+    const audit = new FileAuditStore(process.env.VENTUS_AUDIT_STORE!);
+    const intent = await audit.recordIntent({
+      tenantId: h.tenantId,
+      runId,
+      stepNo: 0,
+      actorType: opts.actorType ?? 'system',
+      actorId: 'test-actor',
+      action,
+      resourceType: 'proposal',
+      resourceId: opts.resourceId ?? 'res-test',
+      payload: {},
+      payloadHash: 'hash',
+    });
+    if (opts.withOutcome) {
+      await audit.recordOutcome({
+        intentId: intent.id,
+        tenantId: h.tenantId,
+        status: 'executed',
+        durationMs: 1,
+      });
+    }
+    return intent;
+  }
+
+  // Helper: complete a run to a terminal state via the store. Used to
+  // construct "clean" baselines and to isolate the orphan/stuck checks
+  // from runIncomplete signal.
+  async function completeRun(runId: string, status: 'completed' | 'failed' = 'completed') {
+    const { FileRunStore } = await import('@ventus/store');
+    const store = new FileRunStore(process.env.VENTUS_RUN_STORE!);
+    await store.complete(runId, { status, finalText: 'done' });
+  }
+
+  // Helper: mark a proposal through its state machine. Used to construct
+  // stuck-proposal scenarios (e.g. left in 'executing' after run completes).
+  async function moveProposalTo(
+    proposalId: string,
+    target: 'approved' | 'executing',
+  ) {
+    const { FileProposalStore } = await import('@ventus/store');
+    const store = new FileProposalStore(process.env.VENTUS_PROPOSAL_STORE!);
+    if (target === 'approved' || target === 'executing') {
+      await store.decide(proposalId, {
+        approverId: 'user-1',
+        verdict: 'approved',
+        decidedAt: new Date().toISOString(),
+      });
+    }
+    if (target === 'executing') {
+      await store.beginExecution(proposalId);
+    }
+  }
+
+  interface ReconcileBody {
+    runId: string;
+    tenantId: string;
+    status: 'clean' | 'has_issues';
+    totals: { intents: number; outcomes: number; proposals: number };
+    issues: {
+      orphanIntents: Array<{
+        intentId: string;
+        action: string;
+        actorType: string;
+        resourceType?: string;
+        resourceId?: string;
+        proposedAt: string;
+        ageMs: number;
+      }>;
+      stuckProposals: Array<{
+        proposalId: string;
+        status: string;
+        actionType: string;
+        updatedAt: string;
+        ageMs: number;
+      }>;
+      runIncomplete: {
+        status: string;
+        lastHeartbeatAt?: string;
+        startedAt: string;
+        cancelRequestedAt?: string;
+      } | null;
+    };
+    trailTruncated: boolean;
+  }
+
+  it('reports a clean run when every intent has an outcome and every proposal is terminal', async () => {
+    const runId = await seedRun(h);
+    const p1 = await seedProposal(h, { runId });
+    await decide(p1, 'rejected'); // terminal: 'rejected'
+    await writeAuditPair(runId, 'tool:create_proposal', { withOutcome: true });
+    await completeRun(runId);
+
+    const res = await h.app.request(`/v1/runs/${runId}/reconcile`, { headers: h.headers });
+    expect(res.status).toBe(200);
+    const body = await readJson<ReconcileBody>(res);
+    expect(body.status).toBe('clean');
+    expect(body.issues.orphanIntents).toEqual([]);
+    expect(body.issues.stuckProposals).toEqual([]);
+    expect(body.issues.runIncomplete).toBeNull();
+    expect(body.totals.intents).toBeGreaterThan(0);
+    expect(body.totals.outcomes).toBe(body.totals.intents);
+    expect(body.trailTruncated).toBe(false);
+  });
+
+  it('surfaces an orphan intent (executor ran but post-action audit/state writes failed)', async () => {
+    // The exact failure mode reconcile is for: intent says we tried to ship,
+    // outcome row is missing, side effect may have committed. Ops must
+    // cross-check with the downstream system.
+    const runId = await seedRun(h);
+    await completeRun(runId, 'failed');
+    const orphan = await writeAuditPair(runId, 'execute_proposal:draft_email_reply', {
+      withOutcome: false,
+      resourceId: 'prop-orphan',
+    });
+
+    const res = await h.app.request(`/v1/runs/${runId}/reconcile`, { headers: h.headers });
+    const body = await readJson<ReconcileBody>(res);
+    expect(body.status).toBe('has_issues');
+    expect(body.issues.orphanIntents).toHaveLength(1);
+    expect(body.issues.orphanIntents[0]!.intentId).toBe(orphan.id);
+    expect(body.issues.orphanIntents[0]!.action).toBe('execute_proposal:draft_email_reply');
+    expect(body.issues.orphanIntents[0]!.ageMs).toBeGreaterThanOrEqual(0);
+    expect(body.totals.intents).toBe(1);
+    expect(body.totals.outcomes).toBe(0);
+  });
+
+  it('surfaces proposals stuck in non-terminal states past run terminal', async () => {
+    // Each non-terminal proposal status should appear in stuckProposals.
+    // 'pending' = waiting for human, 'approved' = approved-but-never-executed,
+    // 'executing' = process died mid-execute. All three are operational gaps
+    // when the run itself has already closed.
+    const runId = await seedRun(h);
+    const pending = await seedProposal(h, { runId });
+    const approved = await seedProposal(h, { runId });
+    const executing = await seedProposal(h, { runId });
+    await moveProposalTo(approved, 'approved');
+    await moveProposalTo(executing, 'executing');
+    await completeRun(runId);
+
+    const res = await h.app.request(`/v1/runs/${runId}/reconcile`, { headers: h.headers });
+    const body = await readJson<ReconcileBody>(res);
+    expect(body.status).toBe('has_issues');
+    const byStatus = new Map(body.issues.stuckProposals.map((p) => [p.status, p.proposalId]));
+    expect(byStatus.get('pending')).toBe(pending);
+    expect(byStatus.get('approved')).toBe(approved);
+    expect(byStatus.get('executing')).toBe(executing);
+    expect(body.totals.proposals).toBe(3);
+  });
+
+  it('reports runIncomplete when the run row is still running', async () => {
+    const runId = await seedRun(h);
+    // Don't complete — leave it as 'running'.
+
+    const res = await h.app.request(`/v1/runs/${runId}/reconcile`, { headers: h.headers });
+    const body = await readJson<ReconcileBody>(res);
+    expect(body.status).toBe('has_issues');
+    expect(body.issues.runIncomplete).not.toBeNull();
+    expect(body.issues.runIncomplete!.status).toBe('running');
+    expect(body.issues.runIncomplete!.startedAt).toBeDefined();
+  });
+
+  it('runIncomplete carries the cancel-requested timestamp when the run is mid-cancel', async () => {
+    // A run that's been told to stop but hasn't finished yet is still
+    // non-terminal — surface the cancel signal so an operator can decide
+    // whether to wait or escalate.
+    const runId = await seedRun(h);
+    const { FileRunStore } = await import('@ventus/store');
+    const store = new FileRunStore(process.env.VENTUS_RUN_STORE!);
+    await store.requestCancel(runId, { requestedBy: 'user-1' });
+
+    const res = await h.app.request(`/v1/runs/${runId}/reconcile`, { headers: h.headers });
+    const body = await readJson<ReconcileBody>(res);
+    expect(body.issues.runIncomplete).not.toBeNull();
+    expect(body.issues.runIncomplete!.cancelRequestedAt).toBeDefined();
+  });
+
+  it('returns 404 across tenants (no existence leak)', async () => {
+    const runId = await seedRun(h, { tenantId: TEST_TENANT_B });
+    const res = await h.app.request(`/v1/runs/${runId}/reconcile`, { headers: h.headers });
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 for unknown id', async () => {
+    const res = await h.app.request(`/v1/runs/00000000-0000-0000-0000-deadbeefdead/reconcile`, {
+      headers: h.headers,
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('combines all three issue classes into a single report', async () => {
+    // The point of reconcile: one read, all gaps surfaced together.
+    const runId = await seedRun(h);
+    await writeAuditPair(runId, 'tool:create_proposal', { withOutcome: false });
+    const stuck = await seedProposal(h, { runId });
+    await moveProposalTo(stuck, 'executing');
+    // Run intentionally left running.
+
+    const res = await h.app.request(`/v1/runs/${runId}/reconcile`, { headers: h.headers });
+    const body = await readJson<ReconcileBody>(res);
+    expect(body.status).toBe('has_issues');
+    expect(body.issues.orphanIntents).toHaveLength(1);
+    expect(body.issues.stuckProposals).toHaveLength(1);
+    expect(body.issues.runIncomplete).not.toBeNull();
+  });
+
+  it('age fields are non-negative integers reflecting time since the event', async () => {
+    const runId = await seedRun(h);
+    await writeAuditPair(runId, 'tool:create_proposal', { withOutcome: false });
+    const stuck = await seedProposal(h, { runId });
+    await moveProposalTo(stuck, 'executing');
+
+    const res = await h.app.request(`/v1/runs/${runId}/reconcile`, { headers: h.headers });
+    const body = await readJson<ReconcileBody>(res);
+    expect(body.issues.orphanIntents[0]!.ageMs).toBeGreaterThanOrEqual(0);
+    expect(body.issues.stuckProposals[0]!.ageMs).toBeGreaterThanOrEqual(0);
+    // Sanity: ages should be in milliseconds, not seconds. A fresh row
+    // should be < 60_000ms old. If this fails the unit is wrong.
+    expect(body.issues.orphanIntents[0]!.ageMs).toBeLessThan(60_000);
+    expect(body.issues.stuckProposals[0]!.ageMs).toBeLessThan(60_000);
+  });
+
+  it('reports clean for one run even when a sibling run in the same tenant has an orphan', async () => {
+    // Regression for codex's gap: per-run scoping must not be subverted by
+    // another run's orphan within the same tenant. Reconcile is a per-run
+    // report; the target's status reflects only its own state.
+    const target = await seedRun(h);
+    await writeAuditPair(target, 'tool:create_proposal', { withOutcome: true });
+    await completeRun(target);
+
+    const sibling = await seedRun(h);
+    await writeAuditPair(sibling, 'execute_proposal:something', {
+      withOutcome: false,
+      resourceId: 'sibling-orphan',
+    });
+
+    const res = await h.app.request(`/v1/runs/${target}/reconcile`, { headers: h.headers });
+    const body = await readJson<ReconcileBody>(res);
+    expect(body.status).toBe('clean');
+    expect(body.issues.orphanIntents).toEqual([]);
+  });
+
+  // withTrailCap is a small wrapper that sets VENTUS_RECONCILE_TRAIL_MAX for
+  // the duration of fn and always restores the original value. Without this,
+  // a failing assertion mid-test would leak the small cap into the NEXT test
+  // (and surface as confusing truncation failures).
+  async function withTrailCap(cap: string, fn: () => Promise<void>) {
+    const prev = process.env.VENTUS_RECONCILE_TRAIL_MAX;
+    process.env.VENTUS_RECONCILE_TRAIL_MAX = cap;
+    try {
+      await fn();
+    } finally {
+      if (prev === undefined) delete process.env.VENTUS_RECONCILE_TRAIL_MAX;
+      else process.env.VENTUS_RECONCILE_TRAIL_MAX = prev;
+    }
+  }
+
+  it('forces has_issues when the trail is truncated, even if visible rows look clean', async () => {
+    // Truncation means older rows are out of view — they MIGHT contain
+    // orphans. A "clean" verdict in that scenario would mislead an
+    // operator into trusting completeness they don't actually have.
+    // Set the cap to 2 via env so we can exercise this without writing
+    // thousands of audit rows.
+    await withTrailCap('2', async () => {
+      const runId = await seedRun(h);
+      // Three matched intent+outcome pairs => trail.length === 3 > cap of 2.
+      await writeAuditPair(runId, 'a', { withOutcome: true });
+      await writeAuditPair(runId, 'b', { withOutcome: true });
+      await writeAuditPair(runId, 'c', { withOutcome: true });
+      await completeRun(runId);
+
+      const res = await h.app.request(`/v1/runs/${runId}/reconcile`, { headers: h.headers });
+      const body = await readJson<ReconcileBody>(res);
+      expect(body.trailTruncated).toBe(true);
+      expect(body.status).toBe('has_issues'); // truncation alone forces it
+      expect(body.issues.orphanIntents).toEqual([]);
+      expect(body.issues.stuckProposals).toEqual([]);
+      expect(body.issues.runIncomplete).toBeNull();
+      expect(body.totals.intents).toBe(2); // sliced to the cap
+    });
+  });
+
+  it('does NOT report truncation when there are exactly cap rows', async () => {
+    // Boundary: trail.length === cap should not flag truncation. The route
+    // fetches cap+1 internally to distinguish "exactly cap" from "more than
+    // cap". Without this, every report that hit the cap would be poisoned.
+    await withTrailCap('2', async () => {
+      const runId = await seedRun(h);
+      await writeAuditPair(runId, 'a', { withOutcome: true });
+      await writeAuditPair(runId, 'b', { withOutcome: true });
+      await completeRun(runId);
+
+      const res = await h.app.request(`/v1/runs/${runId}/reconcile`, { headers: h.headers });
+      const body = await readJson<ReconcileBody>(res);
+      expect(body.trailTruncated).toBe(false);
+      expect(body.status).toBe('clean');
+      expect(body.totals.intents).toBe(2);
+    });
+  });
+
+  it('does not surface intents/proposals from a different run within the same tenant', async () => {
+    // Tenant-scoping is one check; per-run scoping is another. A reconcile
+    // for run X must not return rows from run Y in the same tenant.
+    const targetRun = await seedRun(h);
+    const otherRun = await seedRun(h);
+    await writeAuditPair(targetRun, 'tool:create_proposal', {
+      withOutcome: false,
+      resourceId: 'target',
+    });
+    await writeAuditPair(otherRun, 'tool:create_proposal', {
+      withOutcome: false,
+      resourceId: 'other',
+    });
+    const stuckTarget = await seedProposal(h, { runId: targetRun });
+    const stuckOther = await seedProposal(h, { runId: otherRun });
+    await moveProposalTo(stuckTarget, 'executing');
+    await moveProposalTo(stuckOther, 'executing');
+
+    const res = await h.app.request(`/v1/runs/${targetRun}/reconcile`, { headers: h.headers });
+    const body = await readJson<ReconcileBody>(res);
+    expect(body.issues.orphanIntents).toHaveLength(1);
+    expect(body.issues.orphanIntents[0]!.resourceId).toBe('target');
+    expect(body.issues.stuckProposals).toHaveLength(1);
+    expect(body.issues.stuckProposals[0]!.proposalId).toBe(stuckTarget);
+  });
+});

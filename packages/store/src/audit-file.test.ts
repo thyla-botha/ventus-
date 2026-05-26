@@ -99,6 +99,28 @@ describe('FileAuditStore', () => {
       expect(trail[0]!.intent.id).toBe(a.id);
     });
 
+    it('never pairs an intent with an outcome from a different tenant', async () => {
+      // Codex flagged: the outcome-map join must also be tenant-scoped.
+      // Without that, an outcome row with the same intentId but a different
+      // tenantId could mask an orphan when listAuditTrail is called for
+      // the original tenant. Construct that exact scenario: write an
+      // intent for tenant A, then write an outcome referencing that
+      // intentId BUT carrying tenant B's tenantId. The trail for tenant A
+      // must show the intent as orphan (outcome=null), not paired with B's
+      // cross-tenant outcome.
+      const aIntent = await store.recordIntent(intent({ tenantId: TENANT_A }));
+      await store.recordOutcome({
+        intentId: aIntent.id,
+        tenantId: TENANT_B,
+        status: 'executed',
+        durationMs: 1,
+      });
+      const trail = await store.listAuditTrail({ tenantId: TENANT_A });
+      expect(trail).toHaveLength(1);
+      expect(trail[0]!.intent.id).toBe(aIntent.id);
+      expect(trail[0]!.outcome).toBeNull();
+    });
+
     it('filters by resourceType and resourceId', async () => {
       const target = await store.recordIntent(
         intent({ resourceType: 'proposal', resourceId: 'p1' }),

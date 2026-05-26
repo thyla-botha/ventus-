@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Pre-push hook for the Ventus monorepo.
+#
+# Runs the FULL check suite before code leaves the laptop:
+#   1. lint-tenancy (defence-in-depth — pre-commit might've been bypassed)
+#   2. pnpm -r typecheck (catches type regressions across the workspace)
+#   3. pnpm -r test (catches behavioural regressions across the workspace)
+#
+# Typecheck currently has known pre-existing TS18046 debt (~30 errors in
+# apps/api/src/routes/*.test.ts). We DON'T fail on those today — they're
+# tracked separately and gated by the TS18046 ratchet (TODO). This hook
+# only blocks the push when the count GROWS.
+#
+# Skip with `git push --no-verify` only for true emergencies. The CI
+# pipeline (when it exists) will run the same checks.
+#
+# Install: run `bash scripts/install-hooks.sh` from the repo root.
+
+set -e
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+echo "[pre-push] lint-tenancy..."
+node scripts/lint-tenancy.mjs
+
+echo "[pre-push] typecheck (ratcheted — fails if TS18046 count grows)..."
+# Baseline TS18046 count. When the count grows beyond this number, the
+# hook fails — preventing new debt without forcing a fix of the existing
+# debt. Update this number ONLY when paying debt down.
+BASELINE_TS18046=36
+
+TYPECHECK_OUT=$(pnpm -r typecheck 2>&1 || true)
+TS18046_COUNT=$(echo "$TYPECHECK_OUT" | grep -c "error TS18046" || true)
+OTHER_ERRORS=$(echo "$TYPECHECK_OUT" | grep -E "error TS[0-9]+" | grep -v "TS18046" | wc -l | tr -d ' ')
+
+if [ "$OTHER_ERRORS" -gt 0 ]; then
+  echo ""
+  echo "[pre-push] FAILED — typecheck found $OTHER_ERRORS non-TS18046 error(s):"
+  echo "$TYPECHECK_OUT" | grep -E "error TS[0-9]+" | grep -v "TS18046"
+  exit 1
+fi
+
+if [ "$TS18046_COUNT" -gt "$BASELINE_TS18046" ]; then
+  echo ""
+  echo "[pre-push] FAILED — TS18046 count grew from $BASELINE_TS18046 to $TS18046_COUNT."
+  echo "[pre-push] New unsafe-any test patterns must use readJson<T>() from apps/api/src/test-helpers.ts."
+  echo "[pre-push] If you are paying down debt, update BASELINE_TS18046 in this hook."
+  exit 1
+fi
+
+echo "[pre-push]   typecheck OK (TS18046: $TS18046_COUNT / $BASELINE_TS18046 budget)"
+
+echo "[pre-push] tests..."
+if ! pnpm -r test; then
+  echo ""
+  echo "[pre-push] FAILED — tests are red. Fix before pushing."
+  exit 1
+fi
+
+echo "[pre-push] OK"

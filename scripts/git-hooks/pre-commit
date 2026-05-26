@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Pre-commit hook for the Ventus monorepo.
+#
+# Runs the FAST checks that must pass before a commit lands:
+#   1. lint-tenancy: catches RLS bypass / cross-tenant reads / unauthorised
+#      admin imports.
+#   2. lint-schema-store: catches drift between migrations and TS types.
+#
+# Both run in <1s combined. Heavier checks (typecheck + tests) run in
+# pre-push, not pre-commit, so the inner-loop stays fast. If you want to
+# skip these locally for a work-in-progress commit, use `git commit --no-verify`
+# — but DO NOT habitually do this; the next pre-push will catch you.
+#
+# Install: run `bash scripts/install-hooks.sh` from the repo root.
+
+set -e
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+echo "[pre-commit] lint-tenancy..."
+if ! node scripts/lint-tenancy.mjs; then
+  echo ""
+  echo "[pre-commit] FAILED — tenancy lint found a problem."
+  echo "[pre-commit] Fix the violation (or add the importer to ALLOWED_ADMIN_IMPORTERS"
+  echo "[pre-commit] in scripts/lint-tenancy.mjs if it is a legitimate control-plane process)."
+  exit 1
+fi
+
+echo "[pre-commit] lint-schema-store..."
+if ! node scripts/lint-schema-store.mjs; then
+  echo ""
+  echo "[pre-commit] FAILED — schema/store drift detected."
+  echo "[pre-commit] Either add the missing field to the TS type, or add the"
+  echo "[pre-commit] column to KNOWN_DRIFT in scripts/lint-schema-store.mjs"
+  echo "[pre-commit] with a comment explaining why it lives only in SQL."
+  exit 1
+fi
+
+echo "[pre-commit] OK"

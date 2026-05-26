@@ -1,0 +1,156 @@
+import { Hono } from 'hono';
+import { z } from 'zod';
+import { hashPayload } from '@ventus/audit';
+import { MAX_TENANT_PROFILE_LEN } from '@ventus/store';
+import { requireAdmin } from '../middleware/tenant.js';
+import { getAppState } from '../state.js';
+
+// Bounded, read-only-at-runtime tenant context block.
+//
+//   GET    /v1/tenant/profile     fetch the caller's tenant profile (200 + body | 404)
+//   PUT    /v1/tenant/profile     replace it — admin only (200 + body)
+//   DELETE /v1/tenant/profile     remove it — admin only (204; idempotent)
+//
+// "Caller's tenant" = c.var.tenantId, set by tenantContext middleware. There
+// is intentionally no admin route that takes a tenantId in the body or path —
+// cross-tenant writes would defeat the safety story.
+//
+// WRITE = ADMIN ONLY. The profile body is injected into the system prompt of
+// every agent run for the tenant, so editing it is effectively editing the
+// org-wide prompt. A junior support user must NOT be able to rewrite the
+// prompt that drafts customer comms. Reads stay open to all tenant members —
+// visibility is fine; mutation is the privilege boundary.
+//
+// TODO(auth): the role itself is currently header-derived (x-user-role) in
+// the tenantContext middleware. When real auth lands the role MUST come from
+// verified session claims (Supabase custom claims / JWT) and the header
+// shortcut MUST be removed. Until then, callers can spoof a role and this
+// guard is dev-only protection.
+
+const putSchema = z.object({
+  body: z.string().max(MAX_TENANT_PROFILE_LEN),
+});
+
+export const tenantProfile = new Hono()
+  .get('/', async (c) => {
+    const tenantId = c.var.tenantId;
+    const { tenantProfiles } = getAppState();
+    const profile = await tenantProfiles.get(tenantId);
+    if (!profile) return c.json({ error: 'not found' }, 404);
+    return c.json({ profile });
+  })
+  .put('/', async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return forbidden;
+    const tenantId = c.var.tenantId;
+    const userId = c.var.userId;
+    const parsed = putSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      return c.json({ error: 'invalid body', details: parsed.error.format() }, 400);
+    }
+    const { tenantProfiles, audit } = getAppState();
+
+    // Audit the profile write BEFORE applying it. The body is hashed (not
+    // copied verbatim) so the audit trail proves who set what without
+    // duplicating the full prompt every time. The "what" is recoverable
+    // from the tenant_profiles row at the recorded timestamp — and once
+    // we add a history table (see [[project-deferred-backlog]]) the
+    // intent's bodyHash will pin to a specific version row.
+    const startedAt = Date.now();
+    const intentPayload = {
+      bodyLength: parsed.data.body.length,
+      bodyHash: hashPayload(parsed.data.body),
+    };
+    const intent = await audit.recordIntent({
+      tenantId,
+      stepNo: 0,
+      actorType: 'user',
+      actorId: userId,
+      action: 'set_tenant_profile',
+      resourceType: 'tenant_profile',
+      resourceId: tenantId,
+      payload: intentPayload,
+      payloadHash: hashPayload(intentPayload),
+    });
+
+    try {
+      const profile = await tenantProfiles.set(tenantId, parsed.data.body, {
+        updatedBy: userId,
+      });
+      await audit
+        .recordOutcome({
+          intentId: intent.id,
+          tenantId,
+          status: 'executed',
+          result: { contentHash: profile.contentHash, updatedAt: profile.updatedAt },
+          durationMs: Date.now() - startedAt,
+        })
+        .catch(() => undefined);
+      return c.json({ profile });
+    } catch (err) {
+      // Store enforces the length cap independently of the schema (defense
+      // in depth — the cap MUST be a store invariant, not just an HTTP one).
+      const text = err instanceof Error ? err.message : String(err);
+      const isClientError = /exceeds .* chars/.test(text);
+      await audit
+        .recordOutcome({
+          intentId: intent.id,
+          tenantId,
+          status: 'failed',
+          errorText: text,
+          durationMs: Date.now() - startedAt,
+        })
+        .catch(() => undefined);
+      if (isClientError) return c.json({ error: text }, 400);
+      // eslint-disable-next-line no-console
+      console.error('PUT /v1/tenant/profile failed:', err);
+      return c.json({ error: 'internal error' }, 500);
+    }
+  })
+  // DELETE is implemented as "set to empty string" — keeps the contentHash
+  // story consistent (empty profile is still a snapshot, just hashes to the
+  // empty-string sha) without a second code path in the store.
+  .delete('/', async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return forbidden;
+    const tenantId = c.var.tenantId;
+    const userId = c.var.userId;
+    const { tenantProfiles, audit } = getAppState();
+
+    const startedAt = Date.now();
+    const intent = await audit.recordIntent({
+      tenantId,
+      stepNo: 0,
+      actorType: 'user',
+      actorId: userId,
+      action: 'clear_tenant_profile',
+      resourceType: 'tenant_profile',
+      resourceId: tenantId,
+    });
+
+    try {
+      const profile = await tenantProfiles.set(tenantId, '', { updatedBy: userId });
+      await audit
+        .recordOutcome({
+          intentId: intent.id,
+          tenantId,
+          status: 'executed',
+          result: { contentHash: profile.contentHash, updatedAt: profile.updatedAt },
+          durationMs: Date.now() - startedAt,
+        })
+        .catch(() => undefined);
+      return c.body(null, 204);
+    } catch (err) {
+      const errorText = err instanceof Error ? err.message : String(err);
+      await audit
+        .recordOutcome({
+          intentId: intent.id,
+          tenantId,
+          status: 'failed',
+          errorText,
+          durationMs: Date.now() - startedAt,
+        })
+        .catch(() => undefined);
+      throw err;
+    }
+  });

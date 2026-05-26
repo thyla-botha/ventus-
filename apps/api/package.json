@@ -1,0 +1,32 @@
+{
+  "name": "@ventus/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@ventus/db": "workspace:*",
+    "@ventus/shared": "workspace:*",
+    "@ventus/audit": "workspace:*",
+    "@ventus/store": "workspace:*",
+    "@ventus/skills": "workspace:*",
+    "@ventus/agent-runtime": "workspace:*",
+    "hono": "^4.6.0",
+    "@hono/node-server": "^1.13.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.7.0"
+  }
+}

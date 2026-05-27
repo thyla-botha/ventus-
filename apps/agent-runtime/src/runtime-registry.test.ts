@@ -122,10 +122,11 @@ describe('RuntimeRegistry', () => {
 });
 
 describe('buildDefaultRuntimeRegistry', () => {
-  it('registers the anthropic provider by default', () => {
+  it('registers the anthropic and openrouter providers by default', () => {
     const reg = buildDefaultRuntimeRegistry();
     expect(reg.has('anthropic')).toBe(true);
-    expect(reg.providers()).toContain('anthropic');
+    expect(reg.has('openrouter')).toBe(true);
+    expect(reg.providers()).toEqual(['anthropic', 'openrouter']);
   });
 
   it('does NOT register the fake provider (fake is a test fixture, not a production provider)', () => {
@@ -133,15 +134,20 @@ describe('buildDefaultRuntimeRegistry', () => {
     expect(reg.has('fake')).toBe(false);
   });
 
-  it('does not construct the AnthropicRuntime at build time (factory is lazy)', () => {
-    // AnthropicRuntime throws if ANTHROPIC_API_KEY is missing. The default
-    // registry must not trigger that until create() is called.
-    const previous = process.env.ANTHROPIC_API_KEY;
+  it('does not construct provider runtimes at build time (factories are lazy)', () => {
+    // AnthropicRuntime and OpenRouterRuntime each throw if their API key env
+    // is missing. The default registry must not trigger that until create()
+    // is called — otherwise a tenant configured for one provider would crash
+    // the process at boot because another provider's key is unset.
+    const prevAnthropic = process.env.ANTHROPIC_API_KEY;
+    const prevOpenRouter = process.env.OPENROUTER_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     try {
       expect(() => buildDefaultRuntimeRegistry()).not.toThrow();
     } finally {
-      if (previous !== undefined) process.env.ANTHROPIC_API_KEY = previous;
+      if (prevAnthropic !== undefined) process.env.ANTHROPIC_API_KEY = prevAnthropic;
+      if (prevOpenRouter !== undefined) process.env.OPENROUTER_API_KEY = prevOpenRouter;
     }
   });
 
@@ -153,6 +159,17 @@ describe('buildDefaultRuntimeRegistry', () => {
       expect(() => reg.create('anthropic')).toThrow(/ANTHROPIC_API_KEY/);
     } finally {
       if (previous !== undefined) process.env.ANTHROPIC_API_KEY = previous;
+    }
+  });
+
+  it('openrouter factory throws lazily when API key is missing', () => {
+    const reg = buildDefaultRuntimeRegistry();
+    const previous = process.env.OPENROUTER_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    try {
+      expect(() => reg.create('openrouter')).toThrow(/OPENROUTER_API_KEY/);
+    } finally {
+      if (previous !== undefined) process.env.OPENROUTER_API_KEY = previous;
     }
   });
 });

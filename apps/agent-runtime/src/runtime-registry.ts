@@ -1,5 +1,6 @@
 import type { AgentRuntime } from './runtime.js';
 import { AnthropicRuntime } from './anthropic.js';
+import { OpenRouterRuntime } from './openrouter.js';
 
 // RuntimeRegistry — central seam for picking which AgentRuntime
 // implementation backs a run.
@@ -99,5 +100,6 @@ export class RuntimeRegistry {
 export function buildDefaultRuntimeRegistry(): RuntimeRegistry {
   const reg = new RuntimeRegistry();
   reg.register('anthropic', () => new AnthropicRuntime());
+  reg.register('openrouter', () => new OpenRouterRuntime());
   return reg;
 }

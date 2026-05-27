@@ -18,6 +18,8 @@ export {
 } from './proposal-tool.js';
 export type * from './runtime.js';
 export { usageToMicros, priceForModel } from './runtime.js';
+export { RuntimeRegistry, buildDefaultRuntimeRegistry } from './runtime-registry.js';
+export type { RuntimeFactory } from './runtime-registry.js';
 export {
   ExecutorRegistry,
   buildLocalRegistry,

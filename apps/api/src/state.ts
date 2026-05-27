@@ -12,9 +12,10 @@ import {
   type TenantProfileStore,
 } from '@ventus/store';
 import {
-  AnthropicRuntime,
   FakeAgentRuntime,
+  buildDefaultRuntimeRegistry,
   buildLocalRegistry,
+  RuntimeRegistry,
   type AgentRuntime,
   type ExecutorRegistry,
 } from '@ventus/agent-runtime';
@@ -104,6 +105,10 @@ export interface AppState {
 
 let cached: AppState | null = null;
 let runtimeOverride: AgentRuntime | null = null;
+// Tests can install a custom registry (e.g. with a 'fake' provider) before
+// the first getAppState() of a case. Reset via setRuntimeRegistryForTests(null).
+// Production code never sets this — the default registry is used.
+let customRuntimeRegistry: RuntimeRegistry | null = null;
 
 export function getAppState(): AppState {
   if (cached) return cached;
@@ -157,6 +162,14 @@ export function getAppState(): AppState {
   })();
   const slotsByTenant = new Map<string, number>();
 
+  // Runtime selection: registry of provider→factory, picked by
+  // VENTUS_RUNTIME_PROVIDER env (default 'anthropic'). Per-tenant overrides
+  // land in a follow-up chunk that extends TenantProfile with runtime config.
+  // Tests can swap the registry via setRuntimeRegistryForTests() to register
+  // additional providers (e.g. a fake) without touching env.
+  const runtimeRegistry = customRuntimeRegistry ?? buildDefaultRuntimeRegistry();
+  const defaultProvider = (process.env.VENTUS_RUNTIME_PROVIDER ?? 'anthropic').trim() || 'anthropic';
+
   cached = {
     proposals: new FileProposalStore(proposals),
     audit: new FileAuditStore(auditPath),
@@ -198,7 +211,7 @@ export function getAppState(): AppState {
           ],
         });
       }
-      return new AnthropicRuntime();
+      return runtimeRegistry.create(defaultProvider);
     },
     getSkills: () => {
       if (!skillsPromise) skillsPromise = discoverSkills(skillsDir);
@@ -272,8 +285,17 @@ export function resetAppState(): void {
 
 // Test-only: install a fake runtime. Call BEFORE the first getAppState() of
 // each test (or pair with resetAppState()). Pass null to clear and fall back
-// to AnthropicRuntime on next bind.
+// to the registry-default runtime on next bind.
 export function setRuntimeForTests(runtime: AgentRuntime | null): void {
   runtimeOverride = runtime;
+  cached = null;
+}
+
+// Test-only: install a custom RuntimeRegistry so tests can register provider
+// factories (e.g. a 'fake' provider) without setting env. Pass null to clear
+// and fall back to buildDefaultRuntimeRegistry() on next bind. Resets the
+// cached AppState so the next getAppState() picks up the new registry.
+export function setRuntimeRegistryForTests(registry: RuntimeRegistry | null): void {
+  customRuntimeRegistry = registry;
   cached = null;
 }

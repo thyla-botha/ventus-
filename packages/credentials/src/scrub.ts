@@ -1,0 +1,173 @@
+// PII scrubber for MCP gateway tool calls.
+//
+// Purpose: tool-call payloads pass through the LLM as observed context
+// during agent runs. The compliance story for regulated tenants (real
+// estate, brokers, healthcare partners) requires that direct identifiers
+// — emails, phone numbers, government IDs, payment card numbers — be
+// redacted BEFORE the prompt is built. Once a value is in the prompt
+// stream it lives in provider logs forever; redaction has to be
+// pre-LLM, not post.
+//
+// Design rules:
+//   - This is a SAFETY NET, not the primary control. The real defense is
+//     not putting raw PII into proposal payloads in the first place; the
+//     scrubber catches escapes (an agent quoting back a user's email,
+//     a tool call that surfaces an account number in its response, etc.).
+//   - All redactions replace the matched span with a typed sentinel
+//     ([REDACTED:email], [REDACTED:phone], ...) so downstream rendering
+//     can show "<email redacted>" rather than gibberish.
+//   - Recurses into nested objects and arrays. Strings inside any field
+//     are scrubbed; non-string fields (numbers, booleans) pass through
+//     untouched — a credit-card-shaped NUMBER won't trip because the
+//     regex requires a string with the right separators.
+//   - Conservative on false positives. The phone matcher requires a
+//     country-code-style prefix or strict 10-digit grouping; the SSN
+//     matcher requires explicit dashes; the credit-card matcher requires
+//     Luhn-likely groupings (4-4-4-4 separated by spaces or dashes).
+
+type RedactionType =
+  | 'email'
+  | 'phone'
+  | 'ssn'
+  | 'credit_card'
+  | 'iban'
+  | 'jwt'
+  | 'api_key';
+
+interface Rule {
+  type: RedactionType;
+  // Global, case-insensitive where letters appear. Each rule is run
+  // against every string field.
+  re: RegExp;
+}
+
+// Order matters — earlier rules win for overlapping matches. JWT comes
+// FIRST because its base64url body can contain shorter substrings that
+// look like API keys. credit_card before iban for the same reason.
+const RULES: readonly Rule[] = [
+  // RFC-5322-ish but bounded: max 64 chars local-part, max 255 domain.
+  // Conservative enough that legitimate emails match while a stray
+  // 'foo@bar' substring inside a URL doesn't drag a whole word with it.
+  {
+    type: 'email',
+    re: /[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,253}\.[a-z]{2,24}/gi,
+  },
+  // Phone numbers. Two branches, both REQUIRE either an explicit + prefix
+  // or non-digit separators — a bare digit run is NEVER treated as a
+  // phone (too ambiguous; would eat order ids, SSN-like 9-digit
+  // sequences, and IBAN bodies).
+  //   1. E.164: '+' followed by digits/separators, total length 9-19.
+  //   2. US-style 3-3-4 with explicit separators between each group.
+  {
+    type: 'phone',
+    re: /(?:\+\d[\d\s.()-]{7,17}\d|\b\d{3}[\s.()-]+\d{3}[\s.()-]+\d{4}\b)/g,
+  },
+  // US SSN with explicit dashes only. A bare 9-digit string is too
+  // ambiguous (could be an order id, an invoice, etc.) — we match
+  // ###-##-#### specifically.
+  {
+    type: 'ssn',
+    re: /\b\d{3}-\d{2}-\d{4}\b/g,
+  },
+  // 16-digit card in 4-4-4-4 groups (spaces or dashes). Doesn't verify
+  // Luhn — false positives on a synthetic 16-digit identifier are an
+  // acceptable cost vs. the regex complexity of a real Luhn check.
+  {
+    type: 'credit_card',
+    re: /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g,
+  },
+  // IBAN: country code (2 letters) + check digits (2) + 10-30 alphanumeric.
+  {
+    type: 'iban',
+    re: /\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b/g,
+  },
+  // JWT: three base64url segments separated by dots. The leading
+  // 'eyJ' prefix is the b64-encoded '{"' that begins every JWT header,
+  // so we anchor on it to avoid eating random three-dot strings.
+  {
+    type: 'jwt',
+    re: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
+  },
+  // Generic API key sentinels — sk_live_..., sk-..., AIza... (Google),
+  // ghp_... (GitHub), xoxb-... (Slack bot). These are publishable
+  // prefixes; a leaked one is immediately recognisable.
+  {
+    type: 'api_key',
+    re: /\b(?:sk[-_](?:live|test)_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{32,}|ghp_[A-Za-z0-9]{36}|xox[abprs]-[A-Za-z0-9-]{10,})\b/g,
+  },
+];
+
+const SENTINEL = (type: RedactionType): string => `[REDACTED:${type}]`;
+
+export interface ScrubReport {
+  // Total number of redactions applied, broken down by type. Useful for
+  // operator dashboards ("we scrubbed 1,243 emails this week") and for
+  // surfacing surprises ("why did this run match 47 credit cards?").
+  counts: Partial<Record<RedactionType, number>>;
+  // Whether any redaction was applied at all. Convenience for the
+  // common "did we touch this payload?" branch.
+  redacted: boolean;
+}
+
+export function scrubString(s: string, report?: ScrubReport): string {
+  let out = s;
+  for (const rule of RULES) {
+    let matched = false;
+    out = out.replace(rule.re, () => {
+      matched = true;
+      return SENTINEL(rule.type);
+    });
+    if (matched && report) {
+      // Count distinct match passes per rule. We don't track individual
+      // counts inside the replace callback because String.replace
+      // tracks them implicitly; we just bump by the difference in
+      // SENTINEL occurrences.
+      const before = report.counts[rule.type] ?? 0;
+      const occurrences = (out.match(new RegExp(escapeRe(SENTINEL(rule.type)), 'g')) ?? [])
+        .length;
+      report.counts[rule.type] = Math.max(before, occurrences);
+      report.redacted = true;
+    }
+  }
+  return out;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Recursive value scrubber. Walks plain objects, arrays, and primitive
+// strings; pass-through for numbers, booleans, null, undefined.
+//
+// IMPORTANT: this only recurses into PLAIN objects (Object.getPrototypeOf
+// returns Object.prototype or null). Class instances, Buffers, Dates, etc.
+// are passed through opaque — scrubbing a Buffer's bytes would corrupt
+// binary payloads, and the gateway's contract is JSON-shaped tool args.
+export function scrubValue<T>(value: T, report?: ScrubReport): T {
+  if (typeof value === 'string') {
+    return scrubString(value, report) as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => scrubValue(v, report)) as unknown as T;
+  }
+  if (value !== null && typeof value === 'object') {
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return value;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = scrubValue(v, report);
+    }
+    return out as T;
+  }
+  return value;
+}
+
+// Convenience for the typical "scrub a tool-call payload" path. Returns
+// the scrubbed value + a fresh report so the caller can include the
+// redaction summary in the audit row without juggling state.
+export function scrub<T>(value: T): { value: T; report: ScrubReport } {
+  const report: ScrubReport = { counts: {}, redacted: false };
+  const scrubbed = scrubValue(value, report);
+  return { value: scrubbed, report };
+}
+

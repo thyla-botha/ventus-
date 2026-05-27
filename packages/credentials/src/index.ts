@@ -11,3 +11,4 @@ export {
   type CredentialMetadata,
   type ConnectorType,
 } from './store.js';
+export { scrub, scrubString, scrubValue, type ScrubReport } from './scrub.js';

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Proposal } from '@ventus/store';
 import { MockEmailExecutor } from './mock-email.js';
 import { MockSlackExecutor } from './mock-slack.js';
-import { effectivePayload } from './types.js';
+import { effectivePayload, type ExecutorContext } from './types.js';
 
 const TENANT = '00000000-0000-0000-0000-00000000000a';
 
@@ -25,6 +25,16 @@ function proposal(payload: unknown, actionType = 'draft_email_reply'): Proposal 
       verdict: 'approved',
       decidedAt: new Date().toISOString(),
     },
+  };
+}
+
+function ctx(p: Proposal, over: Partial<ExecutorContext> = {}): ExecutorContext {
+  return {
+    tenantId: p.tenantId,
+    proposalId: p.id,
+    approverId: p.decision?.approverId ?? 'user-1',
+    idempotencyKey: p.id,
+    ...over,
   };
 }
 
@@ -49,11 +59,7 @@ describe('MockEmailExecutor', () => {
 
   it('writes a delivery record to the outbox on valid payload', async () => {
     const p = proposal({ to: 'a@b.com', subject: 'hello', body: 'world' });
-    const result = await exec.execute(p, {
-      tenantId: TENANT,
-      proposalId: p.id,
-      approverId: 'user-1',
-    });
+    const result = await exec.execute(p, ctx(p));
 
     expect((result as { channel: string }).channel).toBe('email');
     expect((result as { to: string }).to).toBe('a@b.com');
@@ -66,16 +72,12 @@ describe('MockEmailExecutor', () => {
 
   it('rejects payload missing required fields', async () => {
     const p = proposal({ to: 'a@b.com' });
-    await expect(
-      exec.execute(p, { tenantId: TENANT, proposalId: p.id, approverId: 'u' }),
-    ).rejects.toThrow(/email payload/);
+    await expect(exec.execute(p, ctx(p))).rejects.toThrow(/email payload/);
   });
 
   it('rejects payload when fields are wrong types', async () => {
     const p = proposal({ to: 1, subject: 's', body: 'b' });
-    await expect(
-      exec.execute(p, { tenantId: TENANT, proposalId: p.id, approverId: 'u' }),
-    ).rejects.toThrow(/email payload/);
+    await expect(exec.execute(p, ctx(p))).rejects.toThrow(/email payload/);
   });
 
   it('prefers decision.editedPayload over the original payload', async () => {
@@ -86,15 +88,34 @@ describe('MockEmailExecutor', () => {
       editedPayload: { to: 'edited@x.com', subject: 's', body: 'b' },
     };
 
-    const result = await exec.execute(p, {
-      tenantId: TENANT,
-      proposalId: p.id,
-      approverId: 'user-1',
-    });
+    const result = await exec.execute(p, ctx(p));
 
     expect((result as { to: string }).to).toBe('edited@x.com');
     const file = JSON.parse(await readFile(path, 'utf8'));
     expect(file.deliveries[0].payload.to).toBe('edited@x.com');
+  });
+
+  it('propagates idempotencyKey as the outbox delivery id', async () => {
+    const p = proposal({ to: 'a@b.com', subject: 's', body: 'b' });
+    const result = await exec.execute(p, ctx(p, { idempotencyKey: 'idem-email-1' }));
+    expect((result as { delivery_id: string }).delivery_id).toBe('idem-email-1');
+
+    const file = JSON.parse(await readFile(path, 'utf8'));
+    expect(file.deliveries[0].id).toBe('idem-email-1');
+  });
+
+  it('dedupes when called twice with the same idempotencyKey (at-most-once delivery)', async () => {
+    // Simulates the crash-then-retry scenario: orchestrator restarts mid-execute
+    // and re-issues with the same proposal.id. Side effect must commit once.
+    const p = proposal({ to: 'a@b.com', subject: 's', body: 'b' });
+    const c = ctx(p, { idempotencyKey: 'replay-key' });
+    const first = await exec.execute(p, c);
+    const second = await exec.execute(p, c);
+    expect((second as { delivery_id: string }).delivery_id).toBe(
+      (first as { delivery_id: string }).delivery_id,
+    );
+    const file = JSON.parse(await readFile(path, 'utf8'));
+    expect(file.deliveries).toHaveLength(1);
   });
 });
 
@@ -119,11 +140,7 @@ describe('MockSlackExecutor', () => {
 
   it('writes a delivery record on valid payload', async () => {
     const p = proposal({ channel: '#general', text: 'hi' }, 'draft_slack_reply');
-    const result = await exec.execute(p, {
-      tenantId: TENANT,
-      proposalId: p.id,
-      approverId: 'user-1',
-    });
+    const result = await exec.execute(p, ctx(p));
 
     expect((result as { channel: string }).channel).toBe('slack');
     const file = JSON.parse(await readFile(path, 'utf8'));
@@ -132,16 +149,19 @@ describe('MockSlackExecutor', () => {
 
   it('rejects payload missing channel', async () => {
     const p = proposal({ text: 'hi' }, 'draft_slack_reply');
-    await expect(
-      exec.execute(p, { tenantId: TENANT, proposalId: p.id, approverId: 'u' }),
-    ).rejects.toThrow(/slack payload/);
+    await expect(exec.execute(p, ctx(p))).rejects.toThrow(/slack payload/);
   });
 
   it('rejects payload missing text', async () => {
     const p = proposal({ channel: '#general' }, 'draft_slack_reply');
-    await expect(
-      exec.execute(p, { tenantId: TENANT, proposalId: p.id, approverId: 'u' }),
-    ).rejects.toThrow(/slack payload/);
+    await expect(exec.execute(p, ctx(p))).rejects.toThrow(/slack payload/);
+  });
+
+  it('propagates idempotencyKey as the outbox delivery id', async () => {
+    const p = proposal({ channel: '#general', text: 'hi' }, 'draft_slack_reply');
+    await exec.execute(p, ctx(p, { idempotencyKey: 'idem-slack-1' }));
+    const file = JSON.parse(await readFile(path, 'utf8'));
+    expect(file.deliveries[0].id).toBe('idem-slack-1');
   });
 });
 

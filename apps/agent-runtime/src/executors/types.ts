@@ -13,6 +13,19 @@ export interface ExecutorContext {
   tenantId: string;
   proposalId: string;
   approverId: string;
+  // Stable, deterministic key for at-most-once delivery on the executor's
+  // downstream side effect. Today it's `proposal.id`; the executeProposal
+  // orchestrator wires it in. Pass it through to whatever downstream call
+  // supports idempotency (SendGrid X-Idempotency-Key, Twilio, Slack thread
+  // dedupe, etc.) AND to local sinks (outbox row id, see appendToOutbox).
+  //
+  // Why this exists even though beginExecution already gates duplicates:
+  // beginExecution prevents two concurrent in-process executes from running.
+  // It does NOT cover (a) a process crash mid-execute where ops manually
+  // resets status back to 'approved' for retry, or (b) a future Postgres
+  // adapter where the state-machine compare-and-set happens across nodes.
+  // A stable key makes those retries safe at the side-effect layer.
+  idempotencyKey: string;
 }
 
 export interface ProposalExecutor {

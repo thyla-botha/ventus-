@@ -32,6 +32,7 @@ export class MockEmailExecutor implements ProposalExecutor {
       proposalId: ctx.proposalId,
       tenantId: ctx.tenantId,
       payload,
+      idempotencyKey: ctx.idempotencyKey,
     });
     return {
       delivery_id: rec.id,

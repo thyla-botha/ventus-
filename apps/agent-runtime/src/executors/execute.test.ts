@@ -104,6 +104,17 @@ describe('executeProposal', () => {
     expect(exec.calls[0]!.ctx.proposalId).toBe(proposal.id);
   });
 
+  it('passes idempotencyKey=proposal.id into executor context (at-most-once contract)', async () => {
+    // The orchestrator MUST supply a stable idempotency key. Today it's
+    // proposal.id; if that ever changes, downstream side effects that dedupe
+    // on the key will silently start duplicating. Pin the contract here.
+    const exec = recorder('draft_email_reply');
+    registry.register(exec);
+    const proposal = await makeApproved(proposals);
+    await executeProposal(proposal.id, { proposals, audit, registry });
+    expect(exec.calls[0]!.ctx.idempotencyKey).toBe(proposal.id);
+  });
+
   it('skips when proposal is missing', async () => {
     const result = await executeProposal('not-a-real-id', { proposals, audit, registry });
     expect(result.status).toBe('skipped');

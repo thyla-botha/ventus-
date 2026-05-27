@@ -128,6 +128,12 @@ async function runOne(proposal: Proposal, deps: ExecuteDeps): Promise<ExecuteRes
       tenantId: proposal.tenantId,
       proposalId: proposal.id,
       approverId: proposal.decision?.approverId ?? 'unknown',
+      // proposal.id is a stable UUID assigned at proposal creation. Reusing it
+      // as the idempotency key means a crash-then-retry execute (intent
+      // already on the audit log, no outcome) replays the same key downstream
+      // and the side effect dedupes instead of duplicating. See ExecutorContext
+      // comment for why this is defense-in-depth beyond beginExecution.
+      idempotencyKey: proposal.id,
     });
   } catch (err) {
     const errorText = err instanceof Error ? err.message : String(err);

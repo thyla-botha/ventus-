@@ -112,15 +112,24 @@ importers:
       '@ventus/audit':
         specifier: workspace:*
         version: link:../../packages/audit
+      '@ventus/credentials':
+        specifier: workspace:*
+        version: link:../../packages/credentials
       '@ventus/db':
         specifier: workspace:*
         version: link:../../packages/db
       '@ventus/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@ventus/store':
+        specifier: workspace:*
+        version: link:../../packages/store
       hono:
         specifier: ^4.6.0
         version: 4.12.23
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
     devDependencies:
       '@types/node':
         specifier: ^22.7.0

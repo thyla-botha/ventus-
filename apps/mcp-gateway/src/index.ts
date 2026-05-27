@@ -1,31 +1,57 @@
 import { serve } from '@hono/node-server';
-import { Hono } from 'hono';
 import { logger } from 'hono/logger';
+import { FileCredentialStore } from '@ventus/credentials';
+import { FileAuditStore } from '@ventus/store';
+import { createGatewayApp } from './app.js';
+import { EchoForwarder, ForwarderRegistry } from './forwarder.js';
 
-// MCP gateway: per-tenant credential resolution, permission enforcement,
-// PII scrubbing, audit. THIS COMPONENT IS HIGH-BLAST-RADIUS.
+// MCP gateway entry. Boots HTTP server with file-backed stores in dev and
+// in production. Per the security contract:
+//   - VENTUS_MCP_GATEWAY_SECRET must be set (HMAC over agent→gateway calls).
+//   - VENTUS_CREDENTIAL_MASTER_KEY must be set (per-tenant subkey derivation).
+//   - In production, both env vars are HARD-required; failure to set them
+//     exits non-zero before the listener binds.
 //
-// Build-vs-buy decision is OPEN. Treat the scaffold below as the in-house
-// shape; revisit before writing the credential vault and scrubber.
-// See docs/decisions/0001-mcp-gateway-build-vs-buy.md (TBD).
+// Storage paths live under VENTUS_GATEWAY_STATE_DIR (default ./.gateway-state)
+// so the gateway process can run isolated from the API process's vault.
+// Same backing file across processes works, but it MUST be the same path on
+// disk — the lock chain is per-instance.
 
-const app = new Hono();
+const isProd = process.env.NODE_ENV === 'production';
 
+if (!process.env.VENTUS_MCP_GATEWAY_SECRET) {
+  if (isProd) {
+    // eslint-disable-next-line no-console
+    console.error('FATAL: VENTUS_MCP_GATEWAY_SECRET not set in production');
+    process.exit(1);
+  }
+  // eslint-disable-next-line no-console
+  console.warn('WARN: VENTUS_MCP_GATEWAY_SECRET not set — tool-call POSTs will 403');
+}
+
+if (!process.env.VENTUS_CREDENTIAL_MASTER_KEY) {
+  if (isProd) {
+    // eslint-disable-next-line no-console
+    console.error('FATAL: VENTUS_CREDENTIAL_MASTER_KEY not set in production');
+    process.exit(1);
+  }
+  // eslint-disable-next-line no-console
+  console.warn('WARN: VENTUS_CREDENTIAL_MASTER_KEY not set — vault decrypt will fail');
+}
+
+const stateDir = process.env.VENTUS_GATEWAY_STATE_DIR ?? '.gateway-state';
+const credentials = new FileCredentialStore(`${stateDir}/credentials.json`);
+const audit = new FileAuditStore(`${stateDir}/audit.json`);
+const forwarders = new ForwarderRegistry()
+  .register(new EchoForwarder('gmail'))
+  .register(new EchoForwarder('gdrive'))
+  .register(new EchoForwarder('slack'))
+  .register(new EchoForwarder('jira'))
+  .register(new EchoForwarder('clickup'))
+  .register(new EchoForwarder('whatsapp'));
+
+const app = createGatewayApp({ credentials, audit, forwarders });
 app.use('*', logger());
-
-app.get('/health', (c) =>
-  c.json({ status: 'ok', service: 'mcp-gateway', ts: new Date().toISOString() }),
-);
-
-// Tool-call endpoint stub. Real impl will:
-//  1. Authenticate the caller (agent runtime mTLS or signed token).
-//  2. Resolve tenant_id from caller identity.
-//  3. Check tenant's agents_enabled flag (kill switch).
-//  4. Look up connector OAuth token (decrypt with tenant key, never log).
-//  5. Run PII scrubber over payload pre-LLM (if outbound).
-//  6. Forward to target MCP server (Gmail, Slack, Jira, etc.).
-//  7. Record intent + outcome audit rows.
-app.post('/v1/tool-call', async (c) => c.json({ error: 'not implemented' }, 501));
 
 const port = Number(process.env.PORT ?? 8081);
 serve({ fetch: app.fetch, port }, (info) => {

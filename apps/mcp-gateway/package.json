@@ -8,14 +8,19 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
     "@ventus/db": "workspace:*",
     "@ventus/shared": "workspace:*",
     "@ventus/audit": "workspace:*",
+    "@ventus/credentials": "workspace:*",
+    "@ventus/store": "workspace:*",
     "hono": "^4.6.0",
-    "@hono/node-server": "^1.13.0"
+    "@hono/node-server": "^1.13.0",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

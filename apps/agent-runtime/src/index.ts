@@ -29,8 +29,14 @@ export {
   setFallbackPricing,
   getFallbackPricing,
   hasModelPricing,
+  validatePricingCoverage,
 } from './pricing.js';
-export { RuntimeRegistry, buildDefaultRuntimeRegistry } from './runtime-registry.js';
+export type { PricingCoverageReport } from './pricing.js';
+export {
+  RuntimeRegistry,
+  buildDefaultRuntimeRegistry,
+  providerChargesForUsage,
+} from './runtime-registry.js';
 export type { RuntimeFactory } from './runtime-registry.js';
 export {
   ExecutorRegistry,

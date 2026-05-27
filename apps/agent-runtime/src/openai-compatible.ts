@@ -126,15 +126,29 @@ export abstract class OpenAICompatibleRuntime implements AgentRuntime {
       // spend), and `usage` is optional in the OpenAI-compatible response
       // shape. A provider that returns no usage would let the loop run
       // unbounded with costMicros=0. Halt instead so the operator notices.
+      //
+      // Validate as finite non-negative safe integers — codex round-9
+      // MEDIUM: `typeof === 'number'` alone passes NaN, Infinity, and
+      // negative values, all of which would corrupt cost accounting and
+      // defeat the ceiling. A malicious or buggy upstream emitting
+      // `prompt_tokens: NaN` would propagate NaN through every comparison
+      // (`NaN >= ceiling` is false) and never halt.
       const usageRaw = response.usage;
-      if (
-        !usageRaw ||
-        typeof usageRaw.prompt_tokens !== 'number' ||
-        typeof usageRaw.completion_tokens !== 'number'
-      ) {
+      if (!usageRaw) {
         yield {
           type: 'error',
           error: `${this.providerLabel} response missing usage — cannot enforce cost ceiling`,
+        };
+        return;
+      }
+      if (!isSafeTokenCount(usageRaw.prompt_tokens) || !isSafeTokenCount(usageRaw.completion_tokens)) {
+        yield {
+          type: 'error',
+          error:
+            `${this.providerLabel} response had invalid usage ` +
+            `(prompt_tokens=${String(usageRaw.prompt_tokens)}, ` +
+            `completion_tokens=${String(usageRaw.completion_tokens)}) — ` +
+            `cannot enforce cost ceiling`,
         };
         return;
       }
@@ -277,15 +291,18 @@ function normalizeAssistantContent(
   return out;
 }
 
-// Reject CR/LF/NUL in header values. Prevents header smuggling if a
-// runtime constructor is wired to user/tenant-supplied config. Exported
-// for subclasses that accept header-bound config (OpenRouter does).
+// Reject CR/LF/NUL **and** the Unicode line separators U+2028/U+2029 in
+// header values. Plain ASCII CR/LF were the original header-smuggling
+// vector; U+2028/U+2029 are line breaks that survive many sanitizers
+// and can still split log lines, JSON traces, and some HTTP intermediaries.
+// Exported for subclasses that accept header-bound config (OpenRouter does).
+// Codex round-9 LOW.
 export function assertSafeHeaderValue(field: string, value: string): void {
   if (typeof value !== 'string') {
     throw new Error(`${field} must be a string`);
   }
-  if (/[\r\n\0]/.test(value)) {
-    throw new Error(`${field} contains control characters`);
+  if (/[\r\n\0\u2028\u2029]/.test(value)) {
+    throw new Error(`${field} contains control or line-separator characters`);
   }
 }
 
@@ -302,7 +319,39 @@ function safeParseJson(raw: string): unknown {
   }
 }
 
+// True iff `v` is a non-negative safe integer suitable for token-count
+// arithmetic. NaN, Infinity, negative, fractional, or unsafe-large values
+// all return false. Used to validate upstream `usage` fields before they
+// feed into cost-ceiling math. Codex round-9 MEDIUM.
+function isSafeTokenCount(v: unknown): v is number {
+  return (
+    typeof v === 'number' &&
+    Number.isFinite(v) &&
+    Number.isInteger(v) &&
+    v >= 0 &&
+    v <= Number.MAX_SAFE_INTEGER
+  );
+}
+
+// Strip values that look like API keys, bearer tokens, or full URLs out
+// of upstream error text before it goes into a Run row's errorText (which
+// is returned by the public read API). The OpenAI SDK has been observed
+// to embed request URLs + sometimes credential-bearing headers in its
+// error messages; without this guard, an inspectable run row would leak
+// the deployment's API key or base URL through the API surface. Codex
+// round-9 LOW. We are intentionally conservative — match common patterns
+// rather than try to parse SDK-specific shapes. The full error still
+// goes to stderr via the run-tracker's console.error path.
+function sanitizeProviderError(text: string): string {
+  return text
+    .replace(/(Authorization:\s*Bearer\s+)[^\s,"']+/gi, '$1[redacted]')
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-[redacted]')
+    .replace(/Bearer\s+[A-Za-z0-9_.~+/-]{16,}/g, 'Bearer [redacted]')
+    .replace(/api[_-]?key["']?\s*[:=]\s*["']?[^\s"',}]{8,}/gi, 'api_key=[redacted]')
+    .replace(/https?:\/\/[^\s"']{4,}/g, '[redacted-url]');
+}
+
 function stringifyError(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
+  const raw = err instanceof Error ? err.message : String(err);
+  return sanitizeProviderError(raw);
 }

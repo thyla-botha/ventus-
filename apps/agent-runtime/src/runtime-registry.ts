@@ -90,6 +90,20 @@ export class RuntimeRegistry {
   }
 }
 
+// Providers whose `computeCostMicros` returns 0 regardless of usage —
+// i.e. self-hosted runtimes where the cost-ceiling guard is moot. Used by
+// pricing-coverage validation so missing pricing entries don't flag these
+// runtimes as "unpriced." Adding a new free provider here is the ONE place
+// to keep in sync when a new self-hosted adapter lands.
+const FREE_PROVIDERS = new Set<string>(['ollama']);
+
+// True iff this provider's runs accrue billable token cost (so a model
+// missing from the pricing catalog would represent an effective cost-ceiling
+// gap). False for Ollama and any future local-inference adapter.
+export function providerChargesForUsage(provider: string): boolean {
+  return !FREE_PROVIDERS.has(provider.trim().toLowerCase());
+}
+
 // Default registry seeded with the providers that ship in this package:
 // anthropic (cloud), openrouter (cloud, OpenAI-compatible), ollama
 // (self-hosted, OpenAI-compatible). All three factories are lazy — none

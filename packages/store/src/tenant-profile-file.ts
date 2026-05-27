@@ -1,11 +1,43 @@
 import { createHash } from 'node:crypto';
 import {
   MAX_TENANT_PROFILE_LEN,
+  MAX_TENANT_RUNTIME_FIELD_LEN,
   type TenantProfile,
   type TenantProfileStore,
   type TenantRuntimeConfig,
 } from './types.js';
 import { readJsonFile, writeJsonFile } from './_file-util.js';
+
+// Rejects any control or line-separator character: C0 controls (0x00-0x1F,
+// excluding nothing here — even tab is too risky inside a stable
+// identifier), DEL (0x7F), C1 controls (0x80-0x9F), and Unicode line
+// separators U+2028/U+2029. Provider/model strings must be safe to embed
+// in logs, audit rows, URL/header values, and JSON without splitting
+// lines or smuggling fields. Codex round-9 MEDIUM.
+const UNSAFE_CHARS_RE = /[\x00-\x1F\x7F-\x9F\u2028\u2029]/u;
+
+function assertSafeRuntimeField(name: string, value: string): void {
+  if (typeof value !== 'string') {
+    throw new Error(`tenant_profile runtime.${name} must be a string`);
+  }
+  // Check unsafe chars against the *original* value — trim() also strips \n,
+  // \r, U+2028/U+2029 as line terminators, so a boundary case like
+  // 'ollama\n' would silently pass if we tested the trimmed string.
+  if (UNSAFE_CHARS_RE.test(value)) {
+    throw new Error(
+      `tenant_profile runtime.${name} contains control or line-separator characters`,
+    );
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new Error(`tenant_profile runtime.${name} must be a non-empty string`);
+  }
+  if (trimmed.length > MAX_TENANT_RUNTIME_FIELD_LEN) {
+    throw new Error(
+      `tenant_profile runtime.${name} exceeds ${MAX_TENANT_RUNTIME_FIELD_LEN} chars (got ${trimmed.length})`,
+    );
+  }
+}
 
 interface FileShape {
   version: 1;
@@ -38,6 +70,11 @@ export class FileTenantProfileStore implements TenantProfileStore {
   async get(tenantId: string): Promise<TenantProfile | null> {
     const state = await this.load();
     return state.profiles[tenantId] ?? null;
+  }
+
+  async list(): Promise<TenantProfile[]> {
+    const state = await this.load();
+    return Object.values(state.profiles);
   }
 
   async set(
@@ -87,12 +124,8 @@ export class FileTenantProfileStore implements TenantProfileStore {
     by: { updatedBy?: string; at?: string },
   ): Promise<TenantProfile> {
     if (runtime !== null) {
-      if (typeof runtime.provider !== 'string' || runtime.provider.trim().length === 0) {
-        throw new Error('tenant_profile runtime.provider must be a non-empty string');
-      }
-      if (typeof runtime.model !== 'string' || runtime.model.trim().length === 0) {
-        throw new Error('tenant_profile runtime.model must be a non-empty string');
-      }
+      assertSafeRuntimeField('provider', runtime.provider);
+      assertSafeRuntimeField('model', runtime.model);
     }
     let result: TenantProfile | undefined;
     const next = this.writeLock.then(async () => {

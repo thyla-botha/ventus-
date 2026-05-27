@@ -12,6 +12,7 @@ import {
   resetAppState,
   setRuntimeForTests,
   setRuntimeRegistryForTests,
+  TenantRuntimeDriftError,
 } from './state.js';
 
 // Snapshot env we touch so cases can mutate freely and restore on teardown.
@@ -177,26 +178,27 @@ describe('AppState.resolveRuntimeForTenant', () => {
     expect(resolved.modelOverride).toBe('llama3.1:8b');
   });
 
-  it('falls back to the deployment default when the tenant override names an unregistered provider', async () => {
+  it('FAILS CLOSED when the tenant override names an unregistered provider (codex round-9 HIGH)', async () => {
+    // Regulated-tenant scenario: tenant pinned to (e.g.) ollama for
+    // data-residency, deploy later drops the ollama provider. Falling
+    // back to the deployment default would silently exfiltrate prompts
+    // to a different (possibly cloud) provider. Refuse to run instead;
+    // operator sees the drift and repairs the config.
     const reg = new RuntimeRegistry();
     const def = new FakeAgentRuntime({ turns: [{ text: 'default' }] });
     reg.register('anthropic', () => def);
     setRuntimeRegistryForTests(reg);
 
     const state = getAppState();
-    // Seed a profile with a stale provider directly via the store so we
-    // can simulate "tenant was configured for provider X, then env dropped X"
-    // (write-time validation would normally block this, but the read path
-    // must still degrade gracefully).
     await state.tenantProfiles.setRuntime(
       TEST_TENANT,
       { provider: 'experimental', model: 'gpt-future' },
       { updatedBy: 'admin-1' },
     );
 
-    const resolved = await state.resolveRuntimeForTenant(TEST_TENANT);
-    expect(resolved.runtime).toBe(def);
-    expect(resolved.modelOverride).toBeUndefined();
+    await expect(state.resolveRuntimeForTenant(TEST_TENANT)).rejects.toThrow(
+      TenantRuntimeDriftError,
+    );
   });
 
   it('runtimeOverride short-circuits the tenant lookup (test fixtures win)', async () => {

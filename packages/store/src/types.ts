@@ -285,6 +285,13 @@ export interface TenantRuntimeConfig {
   model: string;
 }
 
+// Length cap for runtime config fields enforced at the STORE layer. The
+// HTTP route enforces its own 64-char cap via zod; this is the
+// defense-in-depth equivalent at the data layer so direct store callers
+// (file-store repair scripts, migrations, future Postgres adapter)
+// can't bypass it. Codex round-9 MEDIUM.
+export const MAX_TENANT_RUNTIME_FIELD_LEN = 128;
+
 export interface TenantProfile {
   tenantId: string;
   // Free-form markdown the agent will see verbatim at the top of its system
@@ -324,4 +331,11 @@ export interface TenantProfileStore {
     runtime: TenantRuntimeConfig | null,
     by: { updatedBy?: string; at?: string },
   ): Promise<TenantProfile>;
+  // Lists every profile in the store. Admin / boot-time use only — never
+  // exposed through a tenant-scoped route. Used for pricing-coverage
+  // validation and runtime-drift surfacing where the caller has already
+  // proved they're operating at the deployment level, not on behalf of a
+  // single tenant. Returns profiles in arbitrary order; sort at the
+  // caller if you need stability.
+  list(): Promise<TenantProfile[]>;
 }

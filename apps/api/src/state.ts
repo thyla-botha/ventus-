@@ -83,10 +83,14 @@ export interface AppState {
   getRuntime: () => AgentRuntime;
   // Per-tenant form: looks up the tenant's runtime override (if any) and
   // returns the bundle the run-spawning code needs. Falls back to the
-  // deployment default when the tenant has no override or the override
-  // names an unregistered provider (defensive: write-time validation
-  // should have caught that, but we log + fall back rather than 503 the
-  // run if drift somehow happened).
+  // deployment default only when the tenant has NO override. If the tenant
+  // HAS an override but the named provider is no longer registered, this
+  // FAILS CLOSED — throws TenantRuntimeDriftError. Reason: a regulated
+  // tenant pinned to (e.g.) ollama for data-residency must NEVER silently
+  // run under the cloud default after a registry change. Falling back
+  // would exfiltrate prompts past the trust boundary. The drift case is
+  // surfaced via /v1/admin/runtime-drift so operators can detect + repair
+  // before runs start failing. Codex round-9 HIGH.
   resolveRuntimeForTenant: (
     tenantId: string,
   ) => Promise<{ runtime: AgentRuntime; modelOverride?: string }>;
@@ -120,6 +124,28 @@ export interface AppState {
     skills: string;
     tenantProfiles: string;
   };
+}
+
+// Thrown by resolveRuntimeForTenant when the tenant has a stored runtime
+// override whose provider is no longer registered (env drift, mistyped
+// admin write that escaped validation, registry change between writes
+// and now). The HTTP layer translates this to a 503 with a clear
+// "tenant runtime stale" error so the operator can fix the config
+// instead of having the run silently fall back to a different provider.
+// Codex round-9 HIGH — fail-closed.
+export class TenantRuntimeDriftError extends Error {
+  constructor(
+    public readonly tenantId: string,
+    public readonly provider: string,
+  ) {
+    super(
+      `tenant=${tenantId} runtime.provider=${provider} is not registered; ` +
+        `refusing to run (would have to fall back to a different provider, ` +
+        `which violates data-residency assumptions). ` +
+        `Repair via PUT /v1/tenant/runtime or DELETE /v1/tenant/runtime.`,
+    );
+    this.name = 'TenantRuntimeDriftError';
+  }
 }
 
 let cached: AppState | null = null;
@@ -252,15 +278,18 @@ export function getAppState(): AppState {
           modelOverride: cfg.model,
         };
       }
-      // Drift case: tenant has runtime config but the named provider is
-      // no longer registered (env change between writes and now). Log so
-      // the operator notices; fall back to the deployment default rather
-      // than 503 the run.
+      // Drift case (codex round-9 HIGH): tenant has runtime config but
+      // the named provider is no longer registered. Fail CLOSED — falling
+      // back to the deployment default would silently exfiltrate prompts
+      // for a tenant that pinned to (e.g.) ollama for data-residency.
+      // Operators discover drift proactively via /v1/admin/runtime-drift
+      // and repair before runs start failing.
       if (cfg && !runtimeRegistry.has(cfg.provider)) {
         // eslint-disable-next-line no-console
-        console.warn(
-          `tenant=${tenantId} runtime.provider=${cfg.provider} is not registered; falling back to default provider=${defaultProvider}`,
+        console.error(
+          `tenant=${tenantId} runtime.provider=${cfg.provider} is not registered; refusing to run (use /v1/admin/runtime-drift to inventory)`,
         );
+        throw new TenantRuntimeDriftError(tenantId, cfg.provider);
       }
       return { runtime: defaultRuntime() };
     },

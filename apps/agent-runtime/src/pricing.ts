@@ -141,6 +141,48 @@ const CUSTOM_PRICING: Record<string, ModelPricing> = {};
 // silent under-billing.
 let fallbackPricing: ModelPricing = BUILTIN_PRICING['claude-opus-4-7']!;
 
+// Sanity cap on per-token rates. 10_000 micros = 1 cent per token, which
+// is already ~50x the priciest current model (Opus output @ 75 micros).
+// Operators with custom enterprise contracts pricier than this should
+// adjust the cap. The cap exists so an operator pasting `1e9` from a
+// typo can't silently install a rate that makes `usageToMicros` overflow
+// or trip the cost ceiling on the first input token. Codex round-9 HIGH.
+const MAX_MICROS_PER_TOKEN = 10_000;
+
+// Validate a ModelPricing payload: every field must be a finite,
+// non-negative, in-range number. `NaN`, `Infinity`, negative, or absurdly
+// large rates would silently corrupt cost accounting and defeat the
+// cost-ceiling security guarantee. Caller is identified for clearer
+// error messages (registerModelPricing vs setFallbackPricing).
+function assertValidPricing(p: ModelPricing, caller: string): void {
+  if (!p || typeof p !== 'object') {
+    throw new Error(`${caller}: pricing must be an object`);
+  }
+  const fields: (keyof ModelPricing)[] = [
+    'inputMicrosPerToken',
+    'outputMicrosPerToken',
+    'cacheReadMicrosPerToken',
+    'cacheWriteMicrosPerToken',
+  ];
+  for (const f of fields) {
+    const v = p[f];
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      throw new Error(
+        `${caller}: pricing.${f} must be a finite number (got ${String(v)})`,
+      );
+    }
+    if (v < 0) {
+      throw new Error(`${caller}: pricing.${f} must be >= 0 (got ${v})`);
+    }
+    if (v > MAX_MICROS_PER_TOKEN) {
+      throw new Error(
+        `${caller}: pricing.${f}=${v} exceeds sanity cap ${MAX_MICROS_PER_TOKEN} ` +
+          `micros/token. If this is intentional, raise the cap explicitly.`,
+      );
+    }
+  }
+}
+
 export function registerModelPricing(
   model: string,
   pricing: ModelPricing,
@@ -148,6 +190,7 @@ export function registerModelPricing(
   if (typeof model !== 'string' || model.trim().length === 0) {
     throw new Error('registerModelPricing: model must be a non-empty string');
   }
+  assertValidPricing(pricing, 'registerModelPricing');
   CUSTOM_PRICING[model] = pricing;
 }
 
@@ -156,6 +199,7 @@ export function unregisterModelPricing(model: string): void {
 }
 
 export function setFallbackPricing(pricing: ModelPricing): void {
+  assertValidPricing(pricing, 'setFallbackPricing');
   fallbackPricing = pricing;
 }
 
@@ -180,6 +224,36 @@ export function hasModelPricing(model: string): boolean {
 
 export function priceForModel(model: string): ModelPricing {
   return CUSTOM_PRICING[model] ?? BUILTIN_PRICING[model] ?? fallbackPricing;
+}
+
+// Pricing-coverage report. `priced` is the subset of input models that
+// have an explicit entry (custom OR built-in); `unpriced` would fall
+// through to the safety fallback if invoked. Operators use this to
+// decide whether the cost ceiling is calibrated for their deployment.
+//
+// Deduplicates on input — a model named twice (e.g. two skills using
+// the same backing model) is checked once and reported once. Empty
+// strings are filtered out defensively (the orchestrator already
+// validates model strings upstream, but a stray '' here would otherwise
+// surface as a spurious "unpriced" entry).
+export interface PricingCoverageReport {
+  priced: string[];
+  unpriced: string[];
+}
+
+export function validatePricingCoverage(
+  models: readonly string[],
+): PricingCoverageReport {
+  const unique = Array.from(
+    new Set(models.filter((m): m is string => typeof m === 'string' && m.length > 0)),
+  ).sort();
+  const priced: string[] = [];
+  const unpriced: string[] = [];
+  for (const model of unique) {
+    if (hasModelPricing(model)) priced.push(model);
+    else unpriced.push(model);
+  }
+  return { priced, unpriced };
 }
 
 export function usageToMicros(model: string, usage: TokenUsage): number {

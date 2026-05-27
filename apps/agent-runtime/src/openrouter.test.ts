@@ -564,7 +564,32 @@ describe('OpenRouterRuntime', () => {
       ]);
       const events = await collect(runtime.run(baseInput()));
       const err = events.find((e) => e.type === 'error');
-      expect((err as { error: string }).error).toMatch(/missing usage/);
+      // After codex round-9 MEDIUM the runtime distinguishes "usage missing"
+      // from "usage present but malformed" — match either via the cost-ceiling
+      // phrasing both paths share.
+      expect((err as { error: string }).error).toMatch(/cannot enforce cost ceiling/);
+    });
+
+    it('errors out on NaN / negative / Infinity token counts (codex round-9 MEDIUM)', async () => {
+      // Regression for codex round-9: typeof === 'number' alone passes NaN,
+      // Infinity, and negative values, all of which would corrupt cost
+      // accounting and let the ceiling silently miss.
+      for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY, 1.5]) {
+        const { runtime } = makeRuntime([
+          {
+            choices: [
+              {
+                message: { role: 'assistant', content: 'ok' },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: { prompt_tokens: bad, completion_tokens: 5 },
+          },
+        ]);
+        const events = await collect(runtime.run(baseInput()));
+        const err = events.find((e) => e.type === 'error');
+        expect((err as { error: string }).error).toMatch(/invalid usage/);
+      }
     });
 
     it('normalizes assistant_message.content into Anthropic-shaped blocks (text + tool_use)', async () => {
@@ -674,13 +699,22 @@ describe('OpenRouterRuntime', () => {
     it('rejects appUrl containing CR/LF/NUL', () => {
       expect(
         () => new OpenRouterRuntime({ apiKey: 'sk-test', appUrl: 'https://x.test\r\nEvil: yes' }),
-      ).toThrow(/control characters|valid URL/);
+      ).toThrow(/control or line-separator characters|valid URL/);
     });
 
     it('rejects appName containing CR/LF/NUL', () => {
       expect(
         () => new OpenRouterRuntime({ apiKey: 'sk-test', appName: 'evil\r\nX-Title: pwn' }),
-      ).toThrow(/control characters/);
+      ).toThrow(/control or line-separator characters/);
+    });
+
+    it('rejects appName containing Unicode line separators U+2028/U+2029 (codex round-9 LOW)', () => {
+      expect(
+        () => new OpenRouterRuntime({ apiKey: 'sk-test', appName: 'evil X-Title: pwn' }),
+      ).toThrow(/control or line-separator characters/);
+      expect(
+        () => new OpenRouterRuntime({ apiKey: 'sk-test', appName: 'evil X-Title: pwn' }),
+      ).toThrow(/control or line-separator characters/);
     });
 
     it('rejects appUrl that is not a parseable URL', () => {

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { startRunAgent } from '@ventus/agent-runtime';
 import { hashPayload } from '@ventus/audit';
 import type { RunStatus } from '@ventus/store';
-import { getAppState } from '../state.js';
+import { getAppState, TenantRuntimeDriftError } from '../state.js';
 
 // HTTP surface for run provenance. Tenant scoping comes from the
 // tenantContext middleware — we never trust a tenant id from the request
@@ -135,6 +135,19 @@ export const runs = new Hono()
       modelOverride = resolved.modelOverride;
     } catch (err) {
       state.releaseRunSlot(tenantId);
+      if (err instanceof TenantRuntimeDriftError) {
+        return c.json(
+          {
+            error: 'tenant runtime stale',
+            detail:
+              'The runtime provider configured for this tenant is no longer registered. ' +
+              'An admin must repair via PUT /v1/tenant/runtime or DELETE /v1/tenant/runtime ' +
+              'before runs can resume.',
+            provider: err.provider,
+          },
+          503,
+        );
+      }
       const text = err instanceof Error ? err.message : String(err);
       if (/ANTHROPIC_API_KEY|OPENROUTER_API_KEY|API_KEY/i.test(text)) {
         return c.json({ error: 'runtime not configured' }, 503);

@@ -25,6 +25,51 @@ function parseEnvNumber(name: string, fallback: number): number {
 
 const app = createApp();
 const port = Number(process.env.PORT ?? 8080);
+
+// Boot-time pricing-coverage gate. VENTUS_REQUIRE_PRICED_MODELS=1 turns this
+// from "warn on gaps" to "refuse to start on gaps" — operators flip the env
+// flag once they've confirmed every model has an explicit entry in the
+// pricing table. Reason: an unpriced model falls through to the safety
+// fallback, which silently miscalibrates the cost ceiling (the ceiling
+// becomes a fiction). For regulated/billed tenants the gate is the
+// difference between "the ceiling holds" and "the ceiling looks like it
+// holds". We always *log* the report at boot so the same data is in the
+// startup logs even when the gate is off.
+await getAppState()
+  .getPricingCoverageReport()
+  .then((report) => {
+    if (report.ok) {
+      // eslint-disable-next-line no-console
+      console.log(`pricing coverage ok: ${report.entries.length} entries, all priced`);
+      return;
+    }
+    const unpriced = report.entries.filter((e) => !e.priced);
+    const lines = unpriced.map(
+      (e) =>
+        `  - ${e.source}=${e.identifier} model=${e.model}${e.provider ? ` provider=${e.provider}` : ''}`,
+    );
+    const summary = `pricing coverage incomplete: ${report.unpricedCount} unpriced of ${report.entries.length}\n${lines.join('\n')}`;
+    if (process.env.VENTUS_REQUIRE_PRICED_MODELS === '1') {
+      // eslint-disable-next-line no-console
+      console.error(
+        `${summary}\nVENTUS_REQUIRE_PRICED_MODELS=1; refusing to start. ` +
+          `Register pricing via registerModelPricing() at boot or unset the flag.`,
+      );
+      process.exit(1);
+    }
+    // eslint-disable-next-line no-console
+    console.warn(`${summary}\n(set VENTUS_REQUIRE_PRICED_MODELS=1 to fail fast)`);
+  })
+  .catch((err) => {
+    // A failure here means we couldn't even *load* the skill catalog or the
+    // tenant profile store. That's an init-time bug worth surfacing loudly
+    // — but we don't block startup on it because the same failure will
+    // surface on the next real request and report a clearer stack trace
+    // from the route handler.
+    // eslint-disable-next-line no-console
+    console.error('pricing coverage report failed at boot:', err);
+  });
+
 const server = serve({ fetch: app.fetch, port }, (info) => {
   // eslint-disable-next-line no-console
   console.log(`ventus api listening on :${info.port}`);

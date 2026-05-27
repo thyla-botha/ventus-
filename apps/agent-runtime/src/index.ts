@@ -30,6 +30,7 @@ export {
   getFallbackPricing,
   hasModelPricing,
   validatePricingCoverage,
+  resetPricingForTests,
 } from './pricing.js';
 export type { PricingCoverageReport } from './pricing.js';
 export {

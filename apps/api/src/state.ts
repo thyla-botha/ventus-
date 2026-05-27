@@ -15,6 +15,8 @@ import {
   FakeAgentRuntime,
   buildDefaultRuntimeRegistry,
   buildLocalRegistry,
+  hasModelPricing,
+  providerChargesForUsage,
   RuntimeRegistry,
   type AgentRuntime,
   type ExecutorRegistry,
@@ -67,6 +69,55 @@ const SKILLS_DIR = process.env.VENTUS_SKILLS_DIR
   ? resolve(process.env.VENTUS_SKILLS_DIR)
   : resolve(ROOT, 'skills');
 
+// One row of the pricing-coverage report. `source` is where the model name
+// came from (a skill frontmatter, or a tenant's runtime override). `provider`
+// is null for skill entries because skills don't pin a provider — the routing
+// depends on per-tenant config at run time. For tenant entries, `provider` is
+// the registered provider name from the override. `priced` reports whether
+// the model has an entry in the pricing table (custom or built-in). For
+// tenant entries on a free provider (`providerChargesForUsage === false`,
+// e.g. ollama) `priced` is forced true because pricing-table coverage is
+// irrelevant when no money changes hands.
+export interface PricingCoverageEntry {
+  source: 'skill' | 'tenant';
+  identifier: string;
+  provider: string | null;
+  model: string;
+  priced: boolean;
+}
+
+// `ok` is true iff every entry is `priced`. The boot-time gate
+// (VENTUS_REQUIRE_PRICED_MODELS=1) refuses to start the process if `ok`
+// is false; otherwise this report is purely diagnostic and exposed via
+// GET /v1/admin/pricing-coverage so operators can sweep for gaps.
+export interface PricingCoverageReport {
+  entries: readonly PricingCoverageEntry[];
+  ok: boolean;
+  unpricedCount: number;
+}
+
+// One row of the runtime-drift report. A tenant has runtime drift when its
+// stored override names a provider that is no longer registered (env change
+// dropped the provider, mis-spelled name in a manual write, registry refactor
+// between writes and now). Each drift entry is a tenant whose next run would
+// 503 with TenantRuntimeDriftError — the operator surfaces them via
+// GET /v1/admin/runtime-drift and repairs proactively.
+export interface RuntimeDriftEntry {
+  tenantId: string;
+  provider: string;
+  model: string;
+  runtimeUpdatedAt?: string;
+  runtimeUpdatedBy?: string;
+}
+
+export interface RuntimeDriftReport {
+  entries: readonly RuntimeDriftEntry[];
+  // The set of provider names currently registered. Included so the operator
+  // can see "the override points at X, registered providers are [Y, Z]"
+  // without a second round-trip.
+  registeredProviders: readonly string[];
+}
+
 export interface AppState {
   proposals: ProposalStore;
   audit: AuditStore;
@@ -101,6 +152,19 @@ export interface AppState {
   // List registered provider names. Surfaced to clients via the admin
   // endpoint so the UI can present a dropdown.
   listRuntimeProviders: () => string[];
+  // Pricing-coverage report. Walks the skill catalog and every tenant
+  // runtime override and checks whether each named model has an entry in
+  // the pricing table. Used by the GET /v1/admin/pricing-coverage endpoint
+  // and by the optional boot-time gate (VENTUS_REQUIRE_PRICED_MODELS=1).
+  // A run that costs out using the fallback price is a calibration risk —
+  // the cost ceiling stops being a real number when the cost is wrong.
+  getPricingCoverageReport: () => Promise<PricingCoverageReport>;
+  // Runtime-drift report. Lists tenants whose stored runtime override
+  // points at an unregistered provider. The next run for each of these
+  // tenants would 503 (TenantRuntimeDriftError) — the report is the
+  // operator-facing surface that lets them detect drift BEFORE the
+  // tenant hits a failing run. Diagnostic counterpart to HIGH-1.
+  getRuntimeDriftReport: () => Promise<RuntimeDriftReport>;
   // Lazy skill catalog. Loaded on first request — the directory is global to
   // the platform (not tenant-scoped). Returns a fresh promise on cache reset.
   getSkills: () => Promise<Skill[]>;
@@ -178,6 +242,10 @@ export function getAppState(): AppState {
   // lifetime of the AppState. Skill files are platform-global (not tenant
   // scoped) so caching is safe across tenants.
   let skillsPromise: Promise<Skill[]> | null = null;
+  function skillCatalog(): Promise<Skill[]> {
+    if (!skillsPromise) skillsPromise = discoverSkills(skillsDir);
+    return skillsPromise;
+  }
 
   // In-flight agent loops. Each entry removes itself on settle so the Set
   // never grows unbounded. drainInflight() awaits whatever is still open.
@@ -295,10 +363,61 @@ export function getAppState(): AppState {
     },
     hasRuntimeProvider: (provider: string) => runtimeRegistry.has(provider),
     listRuntimeProviders: () => runtimeRegistry.providers(),
-    getSkills: () => {
-      if (!skillsPromise) skillsPromise = discoverSkills(skillsDir);
-      return skillsPromise;
+    getPricingCoverageReport: async () => {
+      // Two independent sources of model names:
+      //   1. Skill frontmatter — each skill names a default model. We don't
+      //      know which provider will route it at run time, so we just check
+      //      pricing-table presence by model name. If the same model name
+      //      appears in two skills we still emit two rows (the caller may
+      //      want per-skill traceability).
+      //   2. Tenant runtime overrides — these carry both provider and model,
+      //      so we skip coverage checks when the provider is in the
+      //      free-tier set (ollama). Without that skip every ollama tenant
+      //      would falsely fail the boot gate.
+      const entries: PricingCoverageEntry[] = [];
+      const skills = await skillCatalog();
+      for (const s of skills) {
+        entries.push({
+          source: 'skill',
+          identifier: s.name,
+          provider: null,
+          model: s.model,
+          priced: hasModelPricing(s.model),
+        });
+      }
+      const profiles = await tenantProfileStore.list();
+      for (const p of profiles) {
+        if (!p.runtime) continue;
+        const chargesForUsage = providerChargesForUsage(p.runtime.provider);
+        const priced = !chargesForUsage || hasModelPricing(p.runtime.model);
+        entries.push({
+          source: 'tenant',
+          identifier: p.tenantId,
+          provider: p.runtime.provider,
+          model: p.runtime.model,
+          priced,
+        });
+      }
+      const unpricedCount = entries.reduce((n, e) => n + (e.priced ? 0 : 1), 0);
+      return { entries, ok: unpricedCount === 0, unpricedCount };
     },
+    getRuntimeDriftReport: async () => {
+      const profiles = await tenantProfileStore.list();
+      const entries: RuntimeDriftEntry[] = [];
+      for (const p of profiles) {
+        if (!p.runtime) continue;
+        if (runtimeRegistry.has(p.runtime.provider)) continue;
+        entries.push({
+          tenantId: p.tenantId,
+          provider: p.runtime.provider,
+          model: p.runtime.model,
+          runtimeUpdatedAt: p.runtimeUpdatedAt,
+          runtimeUpdatedBy: p.runtimeUpdatedBy,
+        });
+      }
+      return { entries, registeredProviders: runtimeRegistry.providers() };
+    },
+    getSkills: () => skillCatalog(),
     trackInflight: (p) => {
       // Settle into a swallowed promise so the Set member never rejects
       // (otherwise Promise.all in drainInflight would short-circuit). We

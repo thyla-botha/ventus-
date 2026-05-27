@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { logger } from 'hono/logger';
 import { tenantContext } from './middleware/tenant.js';
+import { admin } from './routes/admin.js';
 import { health } from './routes/health.js';
 import { proposals } from './routes/proposals.js';
 import { audit } from './routes/audit.js';
@@ -25,6 +26,7 @@ export function createApp(): Hono {
   // gate + audit pattern but are independently mutable (changing the runtime
   // override must not churn the profile body's contentHash).
   app.route('/v1/tenant', tenantProfile);
+  app.route('/v1/admin', admin);
   return app;
 }
 

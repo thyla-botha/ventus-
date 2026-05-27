@@ -77,7 +77,26 @@ export interface AppState {
   // AnthropicRuntime throws on construction without ANTHROPIC_API_KEY — we
   // only want that to surface when a run is actually requested. Tests inject
   // a FakeAgentRuntime via setRuntimeForTests().
+  //
+  // No-tenant form: returns the deployment default (env or test override).
+  // Used by tests and any caller that doesn't have a tenant in scope.
   getRuntime: () => AgentRuntime;
+  // Per-tenant form: looks up the tenant's runtime override (if any) and
+  // returns the bundle the run-spawning code needs. Falls back to the
+  // deployment default when the tenant has no override or the override
+  // names an unregistered provider (defensive: write-time validation
+  // should have caught that, but we log + fall back rather than 503 the
+  // run if drift somehow happened).
+  resolveRuntimeForTenant: (
+    tenantId: string,
+  ) => Promise<{ runtime: AgentRuntime; modelOverride?: string }>;
+  // True iff `provider` is registered in the runtime registry. Routes use
+  // this to validate tenant runtime config on write so a typo doesn't
+  // surface as a 503 at the next run.
+  hasRuntimeProvider: (provider: string) => boolean;
+  // List registered provider names. Surfaced to clients via the admin
+  // endpoint so the UI can present a dropdown.
+  listRuntimeProviders: () => string[];
   // Lazy skill catalog. Loaded on first request — the directory is global to
   // the platform (not tenant-scoped). Returns a fresh promise on cache reset.
   getSkills: () => Promise<Skill[]>;
@@ -164,55 +183,89 @@ export function getAppState(): AppState {
 
   // Runtime selection: registry of provider→factory, picked by
   // VENTUS_RUNTIME_PROVIDER env (default 'anthropic'). Per-tenant overrides
-  // land in a follow-up chunk that extends TenantProfile with runtime config.
-  // Tests can swap the registry via setRuntimeRegistryForTests() to register
-  // additional providers (e.g. a fake) without touching env.
+  // are resolved at run-spawn time via resolveRuntimeForTenant() — see
+  // TenantProfile.runtime. Tests can swap the registry via
+  // setRuntimeRegistryForTests() to register additional providers (e.g.
+  // a fake) without touching env.
   const runtimeRegistry = customRuntimeRegistry ?? buildDefaultRuntimeRegistry();
   const defaultProvider = (process.env.VENTUS_RUNTIME_PROVIDER ?? 'anthropic').trim() || 'anthropic';
+
+  const tenantProfileStore = new FileTenantProfileStore(tenantProfilesPath);
+
+  // Factor out the default-provider construction so getRuntime() and
+  // resolveRuntimeForTenant() share one fallback path. The dev-fake
+  // affordance and runtimeOverride still take precedence.
+  function defaultRuntime(): AgentRuntime {
+    if (runtimeOverride) return runtimeOverride;
+    if (process.env.VENTUS_DEV_FAKE_RUNTIME === '1') {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(
+          'VENTUS_DEV_FAKE_RUNTIME=1 is set but NODE_ENV=production. ' +
+            'Refusing to serve scripted fake runtime in production.',
+        );
+      }
+      return new FakeAgentRuntime({
+        turns: [
+          {
+            tools: [
+              {
+                name: 'create_proposal',
+                input: {
+                  action_type: 'draft_email_reply',
+                  payload: {
+                    to: 'customer@example.com',
+                    subject: 'Re: your inquiry',
+                    body: '[dev fake] This is a scripted draft from VENTUS_DEV_FAKE_RUNTIME=1. Replace with a real ANTHROPIC_API_KEY to test the live model.',
+                  },
+                  confidence: 0.5,
+                },
+              },
+            ],
+          },
+          { text: 'Drafted a reply for review.' },
+        ],
+      });
+    }
+    return runtimeRegistry.create(defaultProvider);
+  }
 
   cached = {
     proposals: new FileProposalStore(proposals),
     audit: new FileAuditStore(auditPath),
     runs: new FileRunStore(runsPath),
-    tenantProfiles: new FileTenantProfileStore(tenantProfilesPath),
+    tenantProfiles: tenantProfileStore,
     registry: buildLocalRegistry(outbox),
-    getRuntime: () => {
-      if (runtimeOverride) return runtimeOverride;
-      // Dev affordance: VENTUS_DEV_FAKE_RUNTIME=1 returns a deterministic
-      // FakeAgentRuntime so the UI flow can be exercised end-to-end without
-      // an ANTHROPIC_API_KEY. Fail closed in production — a misconfigured
-      // prod env should crash hard rather than silently serve scripted data.
+    getRuntime: () => defaultRuntime(),
+    resolveRuntimeForTenant: async (tenantId: string) => {
+      // Tests / dev-fake always short-circuit to the global override —
+      // a tenant config pointing at a real provider must not punch
+      // through a deliberate test fixture.
+      if (runtimeOverride) return { runtime: runtimeOverride };
       if (process.env.VENTUS_DEV_FAKE_RUNTIME === '1') {
-        if (process.env.NODE_ENV === 'production') {
-          throw new Error(
-            'VENTUS_DEV_FAKE_RUNTIME=1 is set but NODE_ENV=production. ' +
-              'Refusing to serve scripted fake runtime in production.',
-          );
-        }
-        return new FakeAgentRuntime({
-          turns: [
-            {
-              tools: [
-                {
-                  name: 'create_proposal',
-                  input: {
-                    action_type: 'draft_email_reply',
-                    payload: {
-                      to: 'customer@example.com',
-                      subject: 'Re: your inquiry',
-                      body: '[dev fake] This is a scripted draft from VENTUS_DEV_FAKE_RUNTIME=1. Replace with a real ANTHROPIC_API_KEY to test the live model.',
-                    },
-                    confidence: 0.5,
-                  },
-                },
-              ],
-            },
-            { text: 'Drafted a reply for review.' },
-          ],
-        });
+        return { runtime: defaultRuntime() };
       }
-      return runtimeRegistry.create(defaultProvider);
+      const profile = await tenantProfileStore.get(tenantId);
+      const cfg = profile?.runtime;
+      if (cfg && runtimeRegistry.has(cfg.provider)) {
+        return {
+          runtime: runtimeRegistry.create(cfg.provider),
+          modelOverride: cfg.model,
+        };
+      }
+      // Drift case: tenant has runtime config but the named provider is
+      // no longer registered (env change between writes and now). Log so
+      // the operator notices; fall back to the deployment default rather
+      // than 503 the run.
+      if (cfg && !runtimeRegistry.has(cfg.provider)) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `tenant=${tenantId} runtime.provider=${cfg.provider} is not registered; falling back to default provider=${defaultProvider}`,
+        );
+      }
+      return { runtime: defaultRuntime() };
     },
+    hasRuntimeProvider: (provider: string) => runtimeRegistry.has(provider),
+    listRuntimeProviders: () => runtimeRegistry.providers(),
     getSkills: () => {
       if (!skillsPromise) skillsPromise = discoverSkills(skillsDir);
       return skillsPromise;

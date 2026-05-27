@@ -122,22 +122,25 @@ export const runs = new Hono()
       );
     }
 
-    // getRuntime() throws when ANTHROPIC_API_KEY is missing — surface as 503
-    // so callers can distinguish "infra not configured" from "bad input".
-    // Anything else is a real server fault: log it and return generic 500
-    // without echoing the error message (it could include stack frames /
-    // file paths that leak deployment details).
+    // resolveRuntimeForTenant() throws when the resolved provider's
+    // constructor fails (e.g. ANTHROPIC_API_KEY missing on the deployment
+    // default, or an open-source provider's baseURL is unreachable at
+    // construction). Surface as 503 so callers can distinguish "infra not
+    // configured" from "bad input". Anything else is a real server fault.
     let runtime;
+    let modelOverride: string | undefined;
     try {
-      runtime = state.getRuntime();
+      const resolved = await state.resolveRuntimeForTenant(tenantId);
+      runtime = resolved.runtime;
+      modelOverride = resolved.modelOverride;
     } catch (err) {
       state.releaseRunSlot(tenantId);
       const text = err instanceof Error ? err.message : String(err);
-      if (/ANTHROPIC_API_KEY/.test(text)) {
+      if (/ANTHROPIC_API_KEY|OPENROUTER_API_KEY|API_KEY/i.test(text)) {
         return c.json({ error: 'runtime not configured' }, 503);
       }
       // eslint-disable-next-line no-console
-      console.error('POST /v1/runs getRuntime() failed:', err);
+      console.error('POST /v1/runs resolveRuntimeForTenant() failed:', err);
       return c.json({ error: 'internal error' }, 500);
     }
 
@@ -151,7 +154,7 @@ export const runs = new Hono()
           runtime,
           tenantProfiles: state.tenantProfiles,
         },
-        { skill, tenantId, agentId, userMessage: message },
+        { skill, tenantId, agentId, userMessage: message, modelOverride },
       );
     } catch (err) {
       state.releaseRunSlot(tenantId);

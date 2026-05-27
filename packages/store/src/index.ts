@@ -16,6 +16,7 @@ export type {
   RunCompletion,
   TenantProfile,
   TenantProfileStore,
+  TenantRuntimeConfig,
 } from './types.js';
 export { MAX_TENANT_PROFILE_LEN } from './types.js';
 export { FileProposalStore } from './proposal-file.js';

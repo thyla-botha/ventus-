@@ -16,6 +16,9 @@ interface ProfileBody {
     contentHash: string;
     updatedAt: string;
     updatedBy?: string;
+    runtime?: { provider: string; model: string };
+    runtimeUpdatedAt?: string;
+    runtimeUpdatedBy?: string;
   };
 }
 
@@ -325,5 +328,172 @@ describe('tenant profile audit coverage', () => {
     // setup) and tenant B did not see it. TEST_TENANT_A is the harness'
     // default tenant — keep an explicit assertion so the imports stay used.
     expect(h.tenantId).toBe(TEST_TENANT_A);
+  });
+});
+
+describe('PUT /v1/tenant/runtime', () => {
+  // Per-tenant runtime override: lets a regulated tenant pin agent runs to
+  // (e.g.) ollama+llama3.1 while a cloud tenant in the same process keeps
+  // anthropic. Admin-gated for the same reason profile body writes are —
+  // switching providers changes who-sees-the-prompt and is at least as
+  // significant as editing the prompt itself.
+  let h: TestHarness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => {
+    await h.cleanup();
+  });
+
+  it('returns 401 without tenant headers', async () => {
+    const res = await h.app.request('/v1/tenant/runtime', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'ollama', model: 'llama3.1:8b' }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 403 when caller is not an admin', async () => {
+    const res = await h.app.request('/v1/tenant/runtime', {
+      method: 'PUT',
+      headers: { ...h.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'ollama', model: 'llama3.1:8b' }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects an invalid body with 400', async () => {
+    const res = await h.app.request('/v1/tenant/runtime', {
+      method: 'PUT',
+      headers: { ...h.adminHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'ollama' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects an unknown provider with 400 + provider list', async () => {
+    const res = await h.app.request('/v1/tenant/runtime', {
+      method: 'PUT',
+      headers: { ...h.adminHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'definitely-not-a-real-provider', model: 'x' }),
+    });
+    expect(res.status).toBe(400);
+    const body = await readJson<{ error: string; providers: string[] }>(res);
+    expect(body.error).toMatch(/unknown runtime provider/);
+    expect(body.providers).toContain('anthropic');
+  });
+
+  it('persists the runtime override and creates an empty-body profile if absent', async () => {
+    const res = await h.app.request('/v1/tenant/runtime', {
+      method: 'PUT',
+      headers: { ...h.adminHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'ollama', model: 'llama3.1:8b' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await readJson<ProfileBody>(res);
+    expect(body.profile.tenantId).toBe(TEST_TENANT_A);
+    expect(body.profile.runtime).toEqual({ provider: 'ollama', model: 'llama3.1:8b' });
+    expect(body.profile.runtimeUpdatedBy).toBe(TEST_USER);
+    // No prior profile, so body is empty but contentHash is still a stable hash.
+    expect(body.profile.body).toBe('');
+    expect(body.profile.contentHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('preserves an existing profile body when only runtime is set', async () => {
+    await h.app.request('/v1/tenant/profile', {
+      method: 'PUT',
+      headers: { ...h.adminHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'Brand voice: warm.' }),
+    });
+    const res = await h.app.request('/v1/tenant/runtime', {
+      method: 'PUT',
+      headers: { ...h.adminHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'ollama', model: 'llama3.1:8b' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await readJson<ProfileBody>(res);
+    expect(body.profile.body).toBe('Brand voice: warm.');
+    expect(body.profile.runtime).toEqual({ provider: 'ollama', model: 'llama3.1:8b' });
+  });
+
+  it('writes audit intent + executed outcome', async () => {
+    const put = await h.app.request('/v1/tenant/runtime', {
+      method: 'PUT',
+      headers: { ...h.adminHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'ollama', model: 'llama3.1:8b' }),
+    });
+    expect(put.status).toBe(200);
+
+    const aud = await h.app.request(
+      `/v1/audit?resourceType=tenant_profile&resourceId=${h.tenantId}`,
+      { headers: h.headers },
+    );
+    const trail = await readJson<AuditTrailBody>(aud);
+    const ev = trail.events.find((e) => e.intent.action === 'set_tenant_runtime');
+    expect(ev).toBeDefined();
+    expect(ev!.intent.actorId).toBe(TEST_USER);
+    expect(ev!.outcome?.status).toBe('executed');
+  });
+});
+
+describe('DELETE /v1/tenant/runtime', () => {
+  let h: TestHarness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => {
+    await h.cleanup();
+  });
+
+  it('returns 403 when caller is not an admin', async () => {
+    const res = await h.app.request('/v1/tenant/runtime', {
+      method: 'DELETE',
+      headers: h.headers,
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('clears the runtime override but preserves the profile body', async () => {
+    await h.app.request('/v1/tenant/profile', {
+      method: 'PUT',
+      headers: { ...h.adminHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'keep me' }),
+    });
+    await h.app.request('/v1/tenant/runtime', {
+      method: 'PUT',
+      headers: { ...h.adminHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'ollama', model: 'llama3.1:8b' }),
+    });
+    const del = await h.app.request('/v1/tenant/runtime', {
+      method: 'DELETE',
+      headers: h.adminHeaders,
+    });
+    expect(del.status).toBe(204);
+    const get = await h.app.request('/v1/tenant/profile', { headers: h.headers });
+    const body = await readJson<ProfileBody>(get);
+    expect(body.profile.body).toBe('keep me');
+    expect(body.profile.runtime).toBeUndefined();
+  });
+
+  it('writes audit intent + executed outcome', async () => {
+    await h.app.request('/v1/tenant/runtime', {
+      method: 'PUT',
+      headers: { ...h.adminHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'ollama', model: 'llama3.1:8b' }),
+    });
+    const del = await h.app.request('/v1/tenant/runtime', {
+      method: 'DELETE',
+      headers: h.adminHeaders,
+    });
+    expect(del.status).toBe(204);
+    const aud = await h.app.request(
+      `/v1/audit?resourceType=tenant_profile&resourceId=${h.tenantId}`,
+      { headers: h.headers },
+    );
+    const trail = await readJson<AuditTrailBody>(aud);
+    const ev = trail.events.find((e) => e.intent.action === 'clear_tenant_runtime');
+    expect(ev).toBeDefined();
+    expect(ev!.outcome?.status).toBe('executed');
   });
 });

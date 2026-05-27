@@ -3,6 +3,7 @@ import {
   MAX_TENANT_PROFILE_LEN,
   type TenantProfile,
   type TenantProfileStore,
+  type TenantRuntimeConfig,
 } from './types.js';
 import { readJsonFile, writeJsonFile } from './_file-util.js';
 
@@ -57,12 +58,18 @@ export class FileTenantProfileStore implements TenantProfileStore {
     let result: TenantProfile | undefined;
     const next = this.writeLock.then(async () => {
       const state = await this.load();
+      // Preserve any existing runtime override across body writes — body
+      // and runtime config are independently managed.
+      const prior = state.profiles[tenantId];
       const profile: TenantProfile = {
         tenantId,
         body: trimmed,
         contentHash,
         updatedAt: by.at ?? new Date().toISOString(),
         updatedBy: by.updatedBy,
+        runtime: prior?.runtime,
+        runtimeUpdatedAt: prior?.runtimeUpdatedAt,
+        runtimeUpdatedBy: prior?.runtimeUpdatedBy,
       };
       state.profiles[tenantId] = profile;
       await writeJsonFile(this.path, state);
@@ -71,6 +78,56 @@ export class FileTenantProfileStore implements TenantProfileStore {
     this.writeLock = next.catch(() => undefined);
     await next;
     if (!result) throw new Error('tenant_profile write produced no result');
+    return result;
+  }
+
+  async setRuntime(
+    tenantId: string,
+    runtime: TenantRuntimeConfig | null,
+    by: { updatedBy?: string; at?: string },
+  ): Promise<TenantProfile> {
+    if (runtime !== null) {
+      if (typeof runtime.provider !== 'string' || runtime.provider.trim().length === 0) {
+        throw new Error('tenant_profile runtime.provider must be a non-empty string');
+      }
+      if (typeof runtime.model !== 'string' || runtime.model.trim().length === 0) {
+        throw new Error('tenant_profile runtime.model must be a non-empty string');
+      }
+    }
+    let result: TenantProfile | undefined;
+    const next = this.writeLock.then(async () => {
+      const state = await this.load();
+      const now = by.at ?? new Date().toISOString();
+      const prior = state.profiles[tenantId];
+      // Create an empty-body profile if none exists yet — symmetric with
+      // set() creating a profile against an absent tenant. The empty body
+      // still hashes to a stable value.
+      const body = prior?.body ?? '';
+      const contentHash =
+        prior?.contentHash ??
+        createHash('sha256').update(body, 'utf8').digest('hex');
+      const profile: TenantProfile = {
+        tenantId,
+        body,
+        contentHash,
+        updatedAt: prior?.updatedAt ?? now,
+        updatedBy: prior?.updatedBy,
+        runtime: runtime
+          ? {
+              provider: runtime.provider.trim(),
+              model: runtime.model.trim(),
+            }
+          : undefined,
+        runtimeUpdatedAt: now,
+        runtimeUpdatedBy: by.updatedBy,
+      };
+      state.profiles[tenantId] = profile;
+      await writeJsonFile(this.path, state);
+      result = profile;
+    });
+    this.writeLock = next.catch(() => undefined);
+    await next;
+    if (!result) throw new Error('tenant_profile runtime write produced no result');
     return result;
   }
 }

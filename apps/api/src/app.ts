@@ -20,7 +20,11 @@ export function createApp(): Hono {
   app.route('/v1/audit', audit);
   app.route('/v1/runs', runs);
   app.route('/v1/skills', skills);
-  app.route('/v1/tenant/profile', tenantProfile);
+  // Mounted at /v1/tenant so the router can host both /profile and /runtime
+  // sub-resources under one Hono. The two sub-resources share the same admin
+  // gate + audit pattern but are independently mutable (changing the runtime
+  // override must not churn the profile body's contentHash).
+  app.route('/v1/tenant', tenantProfile);
   return app;
 }
 

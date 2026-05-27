@@ -100,4 +100,70 @@ describe('FileTenantProfileStore', () => {
     expect(final).not.toBeNull();
     expect(bodies).toContain(final?.body);
   });
+
+  describe('setRuntime', () => {
+    it('creates an empty-body profile when none exists yet', async () => {
+      const p = await store.setRuntime(
+        TENANT_A,
+        { provider: 'ollama', model: 'llama3.1:8b' },
+        { updatedBy: 'admin-1' },
+      );
+      expect(p.body).toBe('');
+      expect(p.contentHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(p.runtime).toEqual({ provider: 'ollama', model: 'llama3.1:8b' });
+      expect(p.runtimeUpdatedBy).toBe('admin-1');
+      expect(p.runtimeUpdatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it('preserves the existing body when only runtime changes', async () => {
+      await store.set(TENANT_A, 'Brand voice: warm.', { updatedBy: 'u' });
+      const p = await store.setRuntime(
+        TENANT_A,
+        { provider: 'ollama', model: 'llama3.1:8b' },
+        { updatedBy: 'admin-1' },
+      );
+      expect(p.body).toBe('Brand voice: warm.');
+      expect(p.runtime).toEqual({ provider: 'ollama', model: 'llama3.1:8b' });
+    });
+
+    it('preserves the existing runtime when only body changes (set)', async () => {
+      await store.setRuntime(
+        TENANT_A,
+        { provider: 'ollama', model: 'llama3.1:8b' },
+        { updatedBy: 'admin-1' },
+      );
+      const p = await store.set(TENANT_A, 'new body', { updatedBy: 'u2' });
+      expect(p.body).toBe('new body');
+      expect(p.runtime).toEqual({ provider: 'ollama', model: 'llama3.1:8b' });
+    });
+
+    it('clears the runtime when passed null', async () => {
+      await store.setRuntime(
+        TENANT_A,
+        { provider: 'ollama', model: 'llama3.1:8b' },
+        { updatedBy: 'admin-1' },
+      );
+      const p = await store.setRuntime(TENANT_A, null, { updatedBy: 'admin-2' });
+      expect(p.runtime).toBeUndefined();
+      expect(p.runtimeUpdatedBy).toBe('admin-2');
+    });
+
+    it('rejects empty provider or model', async () => {
+      await expect(
+        store.setRuntime(TENANT_A, { provider: '', model: 'x' }, { updatedBy: 'u' }),
+      ).rejects.toThrow(/provider/);
+      await expect(
+        store.setRuntime(TENANT_A, { provider: 'x', model: '' }, { updatedBy: 'u' }),
+      ).rejects.toThrow(/model/);
+    });
+
+    it('trims runtime fields on write', async () => {
+      const p = await store.setRuntime(
+        TENANT_A,
+        { provider: '  ollama  ', model: '  llama3.1:8b  ' },
+        { updatedBy: 'u' },
+      );
+      expect(p.runtime).toEqual({ provider: 'ollama', model: 'llama3.1:8b' });
+    });
+  });
 });

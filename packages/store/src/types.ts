@@ -272,6 +272,19 @@ export interface AuditStore {
 // reports and never have it dominate the prompt budget.
 export const MAX_TENANT_PROFILE_LEN = 4_000;
 
+// Per-tenant runtime configuration. Selects which AgentRuntime backs runs
+// for this tenant, overriding the deployment default (VENTUS_RUNTIME_PROVIDER
+// env). Lets one process serve a regulated tenant on Ollama (air-gapped)
+// AND a cloud tenant on GPT-4o without redeploying.
+//
+// `provider` must match a key registered in the RuntimeRegistry — the API
+// layer validates this on write so a typo doesn't surface as a 503 at the
+// next run. `model` is passed verbatim as the run's model override.
+export interface TenantRuntimeConfig {
+  provider: string;
+  model: string;
+}
+
 export interface TenantProfile {
   tenantId: string;
   // Free-form markdown the agent will see verbatim at the top of its system
@@ -285,15 +298,30 @@ export interface TenantProfile {
   // User id of the most recent writer (header-derived for now — see the
   // auth TODO in apps/web/src/lib/api.ts).
   updatedBy?: string;
+  // Optional per-tenant runtime override. Absent → tenant uses the
+  // deployment-level default (VENTUS_RUNTIME_PROVIDER + skill.model).
+  runtime?: TenantRuntimeConfig;
+  runtimeUpdatedAt?: string;
+  runtimeUpdatedBy?: string;
 }
 
 export interface TenantProfileStore {
   get(tenantId: string): Promise<TenantProfile | null>;
-  // Replaces the tenant's profile in full. Throws if body exceeds
-  // MAX_TENANT_PROFILE_LEN. Pass body='' to clear.
+  // Replaces the tenant's profile body in full. Throws if body exceeds
+  // MAX_TENANT_PROFILE_LEN. Pass body='' to clear. Does NOT touch the
+  // runtime config; use setRuntime() for that.
   set(
     tenantId: string,
     body: string,
+    by: { updatedBy?: string; at?: string },
+  ): Promise<TenantProfile>;
+  // Sets / clears the tenant runtime override. Pass null to clear. Does
+  // NOT touch the body. If the tenant has no profile yet, this creates an
+  // empty-body profile with the runtime config attached — symmetric with
+  // set() creating a profile when called against an absent tenant.
+  setRuntime(
+    tenantId: string,
+    runtime: TenantRuntimeConfig | null,
     by: { updatedBy?: string; at?: string },
   ): Promise<TenantProfile>;
 }

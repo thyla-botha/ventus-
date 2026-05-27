@@ -31,15 +31,25 @@ const putSchema = z.object({
   body: z.string().max(MAX_TENANT_PROFILE_LEN),
 });
 
+// Runtime overrides are bounded so a typo can't push multi-kilobyte values
+// into the file row. 64 chars covers any realistic provider name (registered
+// keys are short identifiers) and model id (e.g. 'anthropic/claude-opus-4-7'
+// or 'openrouter/auto') with headroom.
+const MAX_RUNTIME_FIELD_LEN = 64;
+const putRuntimeSchema = z.object({
+  provider: z.string().min(1).max(MAX_RUNTIME_FIELD_LEN),
+  model: z.string().min(1).max(MAX_RUNTIME_FIELD_LEN),
+});
+
 export const tenantProfile = new Hono()
-  .get('/', async (c) => {
+  .get('/profile', async (c) => {
     const tenantId = c.var.tenantId;
     const { tenantProfiles } = getAppState();
     const profile = await tenantProfiles.get(tenantId);
     if (!profile) return c.json({ error: 'not found' }, 404);
     return c.json({ profile });
   })
-  .put('/', async (c) => {
+  .put('/profile', async (c) => {
     const forbidden = requireAdmin(c);
     if (forbidden) return forbidden;
     const tenantId = c.var.tenantId;
@@ -110,7 +120,7 @@ export const tenantProfile = new Hono()
   // DELETE is implemented as "set to empty string" — keeps the contentHash
   // story consistent (empty profile is still a snapshot, just hashes to the
   // empty-string sha) without a second code path in the store.
-  .delete('/', async (c) => {
+  .delete('/profile', async (c) => {
     const forbidden = requireAdmin(c);
     if (forbidden) return forbidden;
     const tenantId = c.var.tenantId;
@@ -136,6 +146,136 @@ export const tenantProfile = new Hono()
           tenantId,
           status: 'executed',
           result: { contentHash: profile.contentHash, updatedAt: profile.updatedAt },
+          durationMs: Date.now() - startedAt,
+        })
+        .catch(() => undefined);
+      return c.body(null, 204);
+    } catch (err) {
+      const errorText = err instanceof Error ? err.message : String(err);
+      await audit
+        .recordOutcome({
+          intentId: intent.id,
+          tenantId,
+          status: 'failed',
+          errorText,
+          durationMs: Date.now() - startedAt,
+        })
+        .catch(() => undefined);
+      throw err;
+    }
+  })
+  // PUT/DELETE /runtime — manage the tenant's per-tenant runtime override.
+  // Independent of the profile body so changing providers doesn't churn the
+  // contentHash (and vice versa). Audit-before-execute, same as profile body
+  // writes: an admin reconfiguring which model runs the agent is at LEAST
+  // as significant as editing the prompt.
+  //
+  // Provider is validated against the live RuntimeRegistry on write so a
+  // typo doesn't surface as a 503 at the next run. The list of registered
+  // providers comes from state.listRuntimeProviders().
+  .put('/runtime', async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return forbidden;
+    const tenantId = c.var.tenantId;
+    const userId = c.var.userId;
+    const parsed = putRuntimeSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      return c.json({ error: 'invalid body', details: parsed.error.format() }, 400);
+    }
+    const state = getAppState();
+    if (!state.hasRuntimeProvider(parsed.data.provider)) {
+      return c.json(
+        {
+          error: `unknown runtime provider: ${parsed.data.provider}`,
+          providers: state.listRuntimeProviders(),
+        },
+        400,
+      );
+    }
+    const { tenantProfiles, audit } = state;
+
+    const startedAt = Date.now();
+    const intentPayload = {
+      provider: parsed.data.provider,
+      model: parsed.data.model,
+    };
+    const intent = await audit.recordIntent({
+      tenantId,
+      stepNo: 0,
+      actorType: 'user',
+      actorId: userId,
+      action: 'set_tenant_runtime',
+      resourceType: 'tenant_profile',
+      resourceId: tenantId,
+      payload: intentPayload,
+      payloadHash: hashPayload(intentPayload),
+    });
+
+    try {
+      const profile = await tenantProfiles.setRuntime(
+        tenantId,
+        { provider: parsed.data.provider, model: parsed.data.model },
+        { updatedBy: userId },
+      );
+      await audit
+        .recordOutcome({
+          intentId: intent.id,
+          tenantId,
+          status: 'executed',
+          result: {
+            runtime: profile.runtime,
+            runtimeUpdatedAt: profile.runtimeUpdatedAt,
+          },
+          durationMs: Date.now() - startedAt,
+        })
+        .catch(() => undefined);
+      return c.json({ profile });
+    } catch (err) {
+      const errorText = err instanceof Error ? err.message : String(err);
+      const isClientError = /must be a non-empty string/.test(errorText);
+      await audit
+        .recordOutcome({
+          intentId: intent.id,
+          tenantId,
+          status: 'failed',
+          errorText,
+          durationMs: Date.now() - startedAt,
+        })
+        .catch(() => undefined);
+      if (isClientError) return c.json({ error: errorText }, 400);
+      // eslint-disable-next-line no-console
+      console.error('PUT /v1/tenant/runtime failed:', err);
+      return c.json({ error: 'internal error' }, 500);
+    }
+  })
+  .delete('/runtime', async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return forbidden;
+    const tenantId = c.var.tenantId;
+    const userId = c.var.userId;
+    const { tenantProfiles, audit } = getAppState();
+
+    const startedAt = Date.now();
+    const intent = await audit.recordIntent({
+      tenantId,
+      stepNo: 0,
+      actorType: 'user',
+      actorId: userId,
+      action: 'clear_tenant_runtime',
+      resourceType: 'tenant_profile',
+      resourceId: tenantId,
+    });
+
+    try {
+      const profile = await tenantProfiles.setRuntime(tenantId, null, {
+        updatedBy: userId,
+      });
+      await audit
+        .recordOutcome({
+          intentId: intent.id,
+          tenantId,
+          status: 'executed',
+          result: { runtime: null, runtimeUpdatedAt: profile.runtimeUpdatedAt },
           durationMs: Date.now() - startedAt,
         })
         .catch(() => undefined);

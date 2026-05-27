@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { AuditTrailRow } from '@ventus/store';
 import {
   makeHarness,
+  readJson,
   seedProposal,
   TEST_TENANT_A,
   TEST_TENANT_B,
   type TestHarness,
 } from '../test-helpers.js';
+
+interface AuditBody {
+  events: AuditTrailRow[];
+}
 
 let h: TestHarness;
 
@@ -29,7 +35,7 @@ describe('GET /v1/audit', () => {
   it('returns empty events when nothing has happened', async () => {
     const res = await h.app.request('/v1/audit', { headers: h.headers });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await readJson<AuditBody>(res);
     expect(body.events).toEqual([]);
   });
 
@@ -40,7 +46,7 @@ describe('GET /v1/audit', () => {
     await decide(b, 'rejected');
 
     const res = await h.app.request('/v1/audit', { headers: h.headers });
-    const body = await res.json();
+    const body = await readJson<AuditBody>(res);
     expect(body.events).toHaveLength(2);
     for (const e of body.events) {
       expect(e.intent.tenantId).toBe(TEST_TENANT_A);
@@ -58,9 +64,9 @@ describe('GET /v1/audit', () => {
       `/v1/audit?resourceType=proposal&resourceId=${a}`,
       { headers: h.headers },
     );
-    const body = await res.json();
+    const body = await readJson<AuditBody>(res);
     expect(body.events).toHaveLength(1);
-    expect(body.events[0].intent.resourceId).toBe(a);
+    expect(body.events[0]!.intent.resourceId).toBe(a);
   });
 
   it('filters by runId', async () => {
@@ -70,9 +76,9 @@ describe('GET /v1/audit', () => {
     await decide(b, 'approved');
 
     const res = await h.app.request('/v1/audit?runId=run-target', { headers: h.headers });
-    const body = await res.json();
+    const body = await readJson<AuditBody>(res);
     expect(body.events).toHaveLength(1);
-    expect(body.events[0].intent.runId).toBe('run-target');
+    expect(body.events[0]!.intent.runId).toBe('run-target');
   });
 
   it('enforces tenant isolation — never leaks rows across tenants', async () => {
@@ -81,7 +87,7 @@ describe('GET /v1/audit', () => {
 
     const otherHeaders = { 'x-tenant-id': TEST_TENANT_B, 'x-user-id': h.userId };
     const res = await h.app.request('/v1/audit', { headers: otherHeaders });
-    const body = await res.json();
+    const body = await readJson<AuditBody>(res);
     expect(body.events).toEqual([]);
   });
 
@@ -105,8 +111,8 @@ describe('GET /v1/audit', () => {
     await decide(b, 'approved');
 
     const res = await h.app.request('/v1/audit', { headers: h.headers });
-    const body = await res.json();
-    const proposedAts = body.events.map((e: { intent: { proposedAt: string } }) => e.intent.proposedAt);
+    const body = await readJson<AuditBody>(res);
+    const proposedAts = body.events.map((e) => e.intent.proposedAt);
     expect([...proposedAts].sort().reverse()).toEqual(proposedAts);
   });
 });

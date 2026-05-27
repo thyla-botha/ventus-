@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AuditTrailRow, Proposal } from '@ventus/store';
 import { getAppState } from '../state.js';
 import {
   makeHarness,
@@ -8,6 +9,20 @@ import {
   TEST_TENANT_B,
   type TestHarness,
 } from '../test-helpers.js';
+
+interface ProposalListBody {
+  proposals: Proposal[];
+}
+interface ProposalBody {
+  proposal: Proposal;
+}
+interface AuditBody {
+  events: AuditTrailRow[];
+}
+interface ExecuteBody {
+  result: { status: string };
+  proposal: Proposal;
+}
 
 let h: TestHarness;
 
@@ -23,7 +38,7 @@ describe('GET /v1/proposals', () => {
   it('returns empty when no proposals exist', async () => {
     const res = await h.app.request('/v1/proposals', { headers: h.headers });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await readJson<ProposalListBody>(res);
     expect(body.proposals).toEqual([]);
   });
 
@@ -32,9 +47,9 @@ describe('GET /v1/proposals', () => {
     await seedProposal(h);
 
     const res = await h.app.request('/v1/proposals', { headers: h.headers });
-    const body = await res.json();
+    const body = await readJson<ProposalListBody>(res);
     expect(body.proposals).toHaveLength(2);
-    expect(body.proposals.every((p: { tenantId: string }) => p.tenantId === TEST_TENANT_A)).toBe(true);
+    expect(body.proposals.every((p) => p.tenantId === TEST_TENANT_A)).toBe(true);
   });
 
   it('filters by status', async () => {
@@ -48,9 +63,9 @@ describe('GET /v1/proposals', () => {
     });
 
     const res = await h.app.request('/v1/proposals?status=approved', { headers: h.headers });
-    const body = await res.json();
+    const body = await readJson<ProposalListBody>(res);
     expect(body.proposals).toHaveLength(1);
-    expect(body.proposals[0].id).toBe(id);
+    expect(body.proposals[0]!.id).toBe(id);
   });
 
   it('rejects invalid status with 400', async () => {
@@ -69,7 +84,7 @@ describe('GET /v1/proposals/:id', () => {
     const id = await seedProposal(h);
     const res = await h.app.request(`/v1/proposals/${id}`, { headers: h.headers });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await readJson<ProposalBody>(res);
     expect(body.proposal.id).toBe(id);
   });
 
@@ -96,22 +111,22 @@ describe('POST /v1/proposals/:id/decide', () => {
       body: JSON.stringify({ verdict: 'approved', comment: 'looks good' }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await readJson<ProposalBody>(res);
     expect(body.proposal.status).toBe('approved');
-    expect(body.proposal.decision.verdict).toBe('approved');
-    expect(body.proposal.decision.comment).toBe('looks good');
-    expect(body.proposal.decision.approverId).toBe(h.userId);
+    expect(body.proposal.decision?.verdict).toBe('approved');
+    expect(body.proposal.decision?.comment).toBe('looks good');
+    expect(body.proposal.decision?.approverId).toBe(h.userId);
 
     // Audit trail recorded
     const aud = await h.app.request(
       `/v1/audit?resourceType=proposal&resourceId=${id}`,
       { headers: h.headers },
     );
-    const trail = await aud.json();
+    const trail = await readJson<AuditBody>(aud);
     expect(trail.events).toHaveLength(1);
-    expect(trail.events[0].intent.action).toBe('decide_proposal:approved');
-    expect(trail.events[0].intent.actorType).toBe('user');
-    expect(trail.events[0].outcome.status).toBe('approved');
+    expect(trail.events[0]!.intent.action).toBe('decide_proposal:approved');
+    expect(trail.events[0]!.intent.actorType).toBe('user');
+    expect(trail.events[0]!.outcome?.status).toBe('approved');
   });
 
   it('rejects a pending proposal', async () => {
@@ -122,7 +137,7 @@ describe('POST /v1/proposals/:id/decide', () => {
       body: JSON.stringify({ verdict: 'rejected', comment: 'wrong tone' }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await readJson<ProposalBody>(res);
     expect(body.proposal.status).toBe('rejected');
   });
 
@@ -135,10 +150,10 @@ describe('POST /v1/proposals/:id/decide', () => {
       body: JSON.stringify({ verdict: 'approved', editedPayload: edited }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await readJson<ProposalBody>(res);
     expect(body.proposal.status).toBe('approved');
-    expect(body.proposal.decision.verdict).toBe('edited');
-    expect(body.proposal.decision.editedPayload).toEqual(edited);
+    expect(body.proposal.decision?.verdict).toBe('edited');
+    expect(body.proposal.decision?.editedPayload).toEqual(edited);
     // original payload preserved
     expect(body.proposal.payload).toEqual({ to: 'a@b.com', subject: 's', body: 'b' });
   });
@@ -155,10 +170,12 @@ describe('POST /v1/proposals/:id/decide', () => {
       `/v1/audit?resourceType=proposal&resourceId=${id}`,
       { headers: h.headers },
     );
-    const trail = await aud.json();
+    const trail = await readJson<AuditBody>(aud);
     expect(trail.events).toHaveLength(1);
-    expect(trail.events[0].intent.action).toBe('decide_proposal:edited');
-    expect(trail.events[0].intent.payload.editedPayload).toEqual(edited);
+    expect(trail.events[0]!.intent.action).toBe('decide_proposal:edited');
+    expect(
+      (trail.events[0]!.intent.payload as { editedPayload: unknown }).editedPayload,
+    ).toEqual(edited);
   });
 
   it('rejects {verdict: "rejected", editedPayload} with 400', async () => {
@@ -174,7 +191,7 @@ describe('POST /v1/proposals/:id/decide', () => {
     expect(res.status).toBe(400);
     // proposal remains pending — no decision was applied
     const after = await h.app.request(`/v1/proposals/${id}`, { headers: h.headers });
-    const body = await after.json();
+    const body = await readJson<ProposalBody>(after);
     expect(body.proposal.status).toBe('pending');
   });
 
@@ -245,7 +262,7 @@ describe('POST /v1/proposals/:id/execute', () => {
       headers: h.headers,
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await readJson<ExecuteBody>(res);
     expect(body.result.status).toBe('executed');
     expect(body.proposal.status).toBe('executed');
   });
@@ -259,7 +276,7 @@ describe('POST /v1/proposals/:id/execute', () => {
       method: 'POST',
       headers: h.headers,
     });
-    const body = await res.json();
+    const body = await readJson<ExecuteBody>(res);
     expect(body.result.status).toBe('executed');
 
     // Audit trail: the execute_proposal intent should record the original
@@ -269,13 +286,12 @@ describe('POST /v1/proposals/:id/execute', () => {
       `/v1/audit?resourceType=proposal&resourceId=${id}`,
       { headers: h.headers },
     );
-    const trail = await aud.json();
-    const exec = trail.events.find(
-      (e: { intent: { action: string } }) =>
-        e.intent.action.startsWith('execute_proposal:'),
+    const trail = await readJson<AuditBody>(aud);
+    const exec = trail.events.find((e) =>
+      e.intent.action.startsWith('execute_proposal:'),
     );
     expect(exec).toBeDefined();
-    expect(exec.outcome.status).toBe('executed');
+    expect(exec?.outcome?.status).toBe('executed');
   });
 
   it('returns 409 when proposal is still pending (cannot execute pre-approval)', async () => {
@@ -341,12 +357,10 @@ describe('POST /v1/proposals/:id/execute', () => {
       `/v1/audit?resourceType=proposal&resourceId=${id}`,
       { headers: h.headers },
     );
-    const trail = await readJson<{
-      events: { intent: { action: string }; outcome: { status: string; errorText?: string } }[];
-    }>(aud);
+    const trail = await readJson<AuditBody>(aud);
     const exec = trail.events.find((e) => e.intent.action.startsWith('execute_proposal:'));
-    expect(exec?.outcome.status).toBe('failed');
-    expect(exec?.outcome.errorText).toBe(SECRET);
+    expect(exec?.outcome?.status).toBe('failed');
+    expect(exec?.outcome?.errorText).toBe(SECRET);
   });
 
   it('sanitises 5xx body when no executor is registered for the action_type', async () => {

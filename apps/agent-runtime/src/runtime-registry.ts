@@ -1,5 +1,6 @@
 import type { AgentRuntime } from './runtime.js';
 import { AnthropicRuntime } from './anthropic.js';
+import { OllamaRuntime } from './ollama.js';
 import { OpenRouterRuntime } from './openrouter.js';
 
 // RuntimeRegistry — central seam for picking which AgentRuntime
@@ -89,10 +90,12 @@ export class RuntimeRegistry {
   }
 }
 
-// Default registry seeded with the providers that ship in this package.
-// Today: 'anthropic' only. Open-source / hosted alternatives (OpenRouter,
-// Ollama, vLLM, etc.) will register themselves through this function as
-// their adapters land in subsequent chunks.
+// Default registry seeded with the providers that ship in this package:
+// anthropic (cloud), openrouter (cloud, OpenAI-compatible), ollama
+// (self-hosted, OpenAI-compatible). All three factories are lazy — none
+// of them do network I/O at registration time, and Ollama doesn't even
+// require an API key, so registering it by default costs nothing for
+// deployments that don't run a local server.
 //
 // FakeAgentRuntime is intentionally NOT registered here — it's a test
 // fixture, not a production provider. Tests that need it should
@@ -100,6 +103,7 @@ export class RuntimeRegistry {
 export function buildDefaultRuntimeRegistry(): RuntimeRegistry {
   const reg = new RuntimeRegistry();
   reg.register('anthropic', () => new AnthropicRuntime());
+  reg.register('ollama', () => new OllamaRuntime());
   reg.register('openrouter', () => new OpenRouterRuntime());
   return reg;
 }

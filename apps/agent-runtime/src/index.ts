@@ -1,6 +1,8 @@
 export { AnthropicRuntime } from './anthropic.js';
 export { OpenRouterRuntime } from './openrouter.js';
 export type { OpenRouterRuntimeOptions } from './openrouter.js';
+export { OllamaRuntime } from './ollama.js';
+export type { OllamaRuntimeOptions } from './ollama.js';
 export { FakeAgentRuntime } from './fake-runtime.js';
 export type { FakeTurn, FakeRuntimeOptions } from './fake-runtime.js';
 export { runAgent, startRunAgent } from './run-agent.js';

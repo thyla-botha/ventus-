@@ -122,11 +122,12 @@ describe('RuntimeRegistry', () => {
 });
 
 describe('buildDefaultRuntimeRegistry', () => {
-  it('registers the anthropic and openrouter providers by default', () => {
+  it('registers anthropic, ollama, and openrouter providers by default', () => {
     const reg = buildDefaultRuntimeRegistry();
     expect(reg.has('anthropic')).toBe(true);
+    expect(reg.has('ollama')).toBe(true);
     expect(reg.has('openrouter')).toBe(true);
-    expect(reg.providers()).toEqual(['anthropic', 'openrouter']);
+    expect(reg.providers()).toEqual(['anthropic', 'ollama', 'openrouter']);
   });
 
   it('does NOT register the fake provider (fake is a test fixture, not a production provider)', () => {
@@ -170,6 +171,24 @@ describe('buildDefaultRuntimeRegistry', () => {
       expect(() => reg.create('openrouter')).toThrow(/OPENROUTER_API_KEY/);
     } finally {
       if (previous !== undefined) process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
+
+  it('ollama factory does NOT require an API key (uses "ollama" placeholder)', () => {
+    // Ollama doesn't authenticate by default; the runtime must construct
+    // without env vars set so a tenant configured for ollama can run on a
+    // fresh machine. The OpenAI SDK requires a non-empty apiKey, so the
+    // adapter supplies the documented placeholder string.
+    const reg = buildDefaultRuntimeRegistry();
+    const prevKey = process.env.OLLAMA_API_KEY;
+    const prevUrl = process.env.OLLAMA_BASE_URL;
+    delete process.env.OLLAMA_API_KEY;
+    delete process.env.OLLAMA_BASE_URL;
+    try {
+      expect(() => reg.create('ollama')).not.toThrow();
+    } finally {
+      if (prevKey !== undefined) process.env.OLLAMA_API_KEY = prevKey;
+      if (prevUrl !== undefined) process.env.OLLAMA_BASE_URL = prevUrl;
     }
   });
 });

@@ -380,3 +380,25 @@ code { color: var(--accent); }
 }
 .form-field textarea:focus { outline: none; border-color: var(--accent-2); }
 .form-actions { display: flex; gap: 8px; align-items: center; }
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 8px;
+}
+.settings-table th,
+.settings-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.settings-table th {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.settings-table tr:last-child td { border-bottom: none; }
+.settings-table code { font-size: 12px; }

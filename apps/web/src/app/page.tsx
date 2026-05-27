@@ -19,6 +19,9 @@ export default function Home() {
         <Link href={{ pathname: '/audit' as const }} className="cta cta-ghost">
           Audit trail &rarr;
         </Link>
+        <Link href={{ pathname: '/settings' as const }} className="cta cta-ghost">
+          Settings &rarr;
+        </Link>
       </div>
     </main>
   );

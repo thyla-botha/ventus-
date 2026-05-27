@@ -48,21 +48,32 @@ export type ProposalStatus =
 // read from the request session (Supabase auth or equivalent), so that the
 // API's tenantContext middleware actually gates on authenticated state. See
 // also apps/api/src/middleware/tenant.ts and the matching prod TODO there.
-function authHeaders(): Record<string, string> {
-  return {
+function authHeaders(opts: { asAdmin?: boolean } = {}): Record<string, string> {
+  const h: Record<string, string> = {
     'x-tenant-id': process.env.VENTUS_TENANT_ID ?? DEV_TENANT_ID,
     'x-user-id': process.env.VENTUS_USER_ID ?? DEV_USER_ID,
   };
+  // TODO(auth): admin role is currently header-asserted. Until real session
+  // claims land, the settings UI elevates the dev caller to admin for writes
+  // and admin diagnostics. Production callers MUST derive the role from
+  // verified JWT claims and drop the header path entirely.
+  if (opts.asAdmin) h['x-user-role'] = 'admin';
+  return h;
 }
 
-async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
+interface HttpOptions extends RequestInit {
+  asAdmin?: boolean;
+}
+
+async function http<T>(path: string, init: HttpOptions = {}): Promise<T> {
+  const { asAdmin, ...rest } = init;
   const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
+    ...rest,
     cache: 'no-store',
     headers: {
-      ...authHeaders(),
-      ...(init.body ? { 'content-type': 'application/json' } : {}),
-      ...(init.headers ?? {}),
+      ...authHeaders({ asAdmin }),
+      ...(rest.body ? { 'content-type': 'application/json' } : {}),
+      ...(rest.headers ?? {}),
     },
   });
   const text = await res.text();
@@ -297,4 +308,103 @@ export async function getSkill(name: string): Promise<SkillView | null> {
     if (err instanceof Error && err.message.startsWith('404')) return null;
     throw err;
   }
+}
+
+// ----------------------------------------------------------------------------
+// Tenant profile + runtime override
+// ----------------------------------------------------------------------------
+
+// Mirrors @ventus/store TenantProfile. The body is the human-authored context
+// block injected into every agent run's system prompt; runtime is the
+// per-tenant provider/model override (null when the tenant uses the skill's
+// default model).
+export interface TenantRuntimeConfig {
+  provider: string;
+  model: string;
+}
+
+export interface TenantProfile {
+  tenantId: string;
+  body: string;
+  contentHash: string;
+  updatedAt: string;
+  updatedBy?: string;
+  runtime?: TenantRuntimeConfig | null;
+  runtimeUpdatedAt?: string;
+  runtimeUpdatedBy?: string;
+}
+
+export async function getTenantProfile(): Promise<TenantProfile | null> {
+  try {
+    const data = await http<{ profile: TenantProfile }>(`/v1/tenant/profile`);
+    return data.profile;
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('404')) return null;
+    throw err;
+  }
+}
+
+export async function setTenantProfile(body: string): Promise<TenantProfile> {
+  const data = await http<{ profile: TenantProfile }>(`/v1/tenant/profile`, {
+    method: 'PUT',
+    asAdmin: true,
+    body: JSON.stringify({ body }),
+  });
+  return data.profile;
+}
+
+export async function deleteTenantProfile(): Promise<void> {
+  await http<void>(`/v1/tenant/profile`, { method: 'DELETE', asAdmin: true });
+}
+
+export async function setTenantRuntime(cfg: TenantRuntimeConfig): Promise<TenantProfile> {
+  const data = await http<{ profile: TenantProfile }>(`/v1/tenant/runtime`, {
+    method: 'PUT',
+    asAdmin: true,
+    body: JSON.stringify(cfg),
+  });
+  return data.profile;
+}
+
+export async function deleteTenantRuntime(): Promise<void> {
+  await http<void>(`/v1/tenant/runtime`, { method: 'DELETE', asAdmin: true });
+}
+
+// ----------------------------------------------------------------------------
+// Admin diagnostics — pricing coverage + runtime drift
+// ----------------------------------------------------------------------------
+
+export interface PricingCoverageEntry {
+  source: 'skill' | 'tenant';
+  identifier: string;
+  provider: string | null;
+  model: string;
+  priced: boolean;
+}
+
+export interface PricingCoverageReport {
+  entries: PricingCoverageEntry[];
+  ok: boolean;
+  unpricedCount: number;
+}
+
+export async function getPricingCoverage(): Promise<PricingCoverageReport> {
+  return http<PricingCoverageReport>(`/v1/admin/pricing-coverage`, { asAdmin: true });
+}
+
+export interface RuntimeDriftEntry {
+  tenantId: string;
+  provider: string;
+  model: string;
+  runtimeUpdatedAt?: string;
+  runtimeUpdatedBy?: string;
+}
+
+export interface RuntimeDriftReport {
+  entries: RuntimeDriftEntry[];
+  registeredProviders: string[];
+}
+
+export async function getRuntimeDrift(): Promise<RuntimeDriftReport> {
+  return http<RuntimeDriftReport>(`/v1/admin/runtime-drift`, { asAdmin: true });
 }

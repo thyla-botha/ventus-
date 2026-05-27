@@ -61,13 +61,25 @@ await getAppState()
     console.warn(`${summary}\n(set VENTUS_REQUIRE_PRICED_MODELS=1 to fail fast)`);
   })
   .catch((err) => {
-    // A failure here means we couldn't even *load* the skill catalog or the
-    // tenant profile store. That's an init-time bug worth surfacing loudly
-    // — but we don't block startup on it because the same failure will
-    // surface on the next real request and report a clearer stack trace
-    // from the route handler.
+    // A failure here means we couldn't even *load* the skill catalog or
+    // the tenant profile store. With the require flag off this is an
+    // init-time bug worth surfacing loudly but not a startup blocker —
+    // the same failure resurfaces from the route handler with a cleaner
+    // stack trace. With the flag ON, however, the operator has explicitly
+    // asked us to fail-closed on coverage gaps. Coverage UNKNOWN is at
+    // least as bad as coverage incomplete, so we honour the same exit
+    // contract here. Codex round-10 P2.
     // eslint-disable-next-line no-console
     console.error('pricing coverage report failed at boot:', err);
+    if (process.env.VENTUS_REQUIRE_PRICED_MODELS === '1') {
+      // eslint-disable-next-line no-console
+      console.error(
+        'VENTUS_REQUIRE_PRICED_MODELS=1; refusing to start because pricing ' +
+          'coverage could not be verified (skill catalog or tenant profile ' +
+          'store unreadable). Fix the underlying read error or unset the flag.',
+      );
+      process.exit(1);
+    }
   });
 
 const server = serve({ fetch: app.fetch, port }, (info) => {

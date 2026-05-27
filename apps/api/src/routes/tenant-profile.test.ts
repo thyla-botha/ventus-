@@ -372,6 +372,31 @@ describe('PUT /v1/tenant/runtime', () => {
     expect(res.status).toBe(400);
   });
 
+  it('rejects unsafe characters in provider/model with 400 (codex round-10 P2)', async () => {
+    // The store layer rejects control chars and U+2028/U+2029 as
+    // defense-in-depth, but if the route schema doesn't reject them too,
+    // the store throw bubbles to a 500. The HTTP contract for "bad client
+    // input" must always be 400. The cases mirror the store-level test
+    // matrix: newline, CR, U+2028 (line separator), NUL, DEL.
+    const cases = [
+      { provider: 'ollama\n', model: 'm' },
+      { provider: 'ollama\rsmuggled', model: 'm' },
+      { provider: 'ollama smuggled', model: 'm' },
+      { provider: 'ollama\x00', model: 'm' },
+      { provider: 'ollama\x7f', model: 'm' },
+      { provider: 'ollama', model: 'm\n' },
+      { provider: 'ollama', model: 'm ' },
+    ];
+    for (const body of cases) {
+      const res = await h.app.request('/v1/tenant/runtime', {
+        method: 'PUT',
+        headers: { ...h.adminHeaders, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(res.status, `payload=${JSON.stringify(body)}`).toBe(400);
+    }
+  });
+
   it('rejects an unknown provider with 400 + provider list', async () => {
     const res = await h.app.request('/v1/tenant/runtime', {
       method: 'PUT',

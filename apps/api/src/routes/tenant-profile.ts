@@ -36,9 +36,22 @@ const putSchema = z.object({
 // keys are short identifiers) and model id (e.g. 'anthropic/claude-opus-4-7'
 // or 'openrouter/auto') with headroom.
 const MAX_RUNTIME_FIELD_LEN = 64;
+// Mirrors UNSAFE_CHARS_RE in the store layer: C0/C1 control bytes, DEL,
+// and Unicode line separators (U+2028/U+2029). The store also rejects
+// these as defense-in-depth, but rejecting at the route gives the admin
+// a 400 with a clear schema error instead of bubbling a store throw up
+// to the 500 classifier. Codex round-10 P2.
+const UNSAFE_RUNTIME_FIELD_RE = /[\x00-\x1F\x7F-\x9F\u2028\u2029]/u;
+const safeRuntimeField = z
+  .string()
+  .min(1)
+  .max(MAX_RUNTIME_FIELD_LEN)
+  .refine((s) => !UNSAFE_RUNTIME_FIELD_RE.test(s), {
+    message: 'must not contain control or line-separator characters',
+  });
 const putRuntimeSchema = z.object({
-  provider: z.string().min(1).max(MAX_RUNTIME_FIELD_LEN),
-  model: z.string().min(1).max(MAX_RUNTIME_FIELD_LEN),
+  provider: safeRuntimeField,
+  model: safeRuntimeField,
 });
 
 export const tenantProfile = new Hono()
@@ -232,7 +245,15 @@ export const tenantProfile = new Hono()
       return c.json({ profile });
     } catch (err) {
       const errorText = err instanceof Error ? err.message : String(err);
-      const isClientError = /must be a non-empty string/.test(errorText);
+      // Any store-layer assertSafeRuntimeField throw is structurally client
+      // input — the zod schema rejects these too, so this branch is mostly
+      // belt-and-braces, but a direct repair script or future Postgres
+      // adapter that bypasses the route still gets a clean 400 here.
+      // Codex round-10 P2.
+      const isClientError =
+        /must be a non-empty string/.test(errorText) ||
+        /contains control or line-separator characters/.test(errorText) ||
+        /exceeds \d+ chars/.test(errorText);
       await audit
         .recordOutcome({
           intentId: intent.id,

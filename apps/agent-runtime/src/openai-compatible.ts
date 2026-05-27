@@ -4,13 +4,8 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionTool,
 } from 'openai/resources/chat/completions.mjs';
-import type {
-  AgentRuntime,
-  RunInput,
-  RunStepEvent,
-  TokenUsage,
-} from './runtime.js';
-import { usageToMicros } from './runtime.js';
+import type { AgentRuntime, RunInput, RunStepEvent } from './runtime.js';
+import { usageToMicros, type TokenUsage } from './pricing.js';
 
 // Shared base for OpenAI-compatible providers (OpenRouter, Ollama, vLLM,
 // LM Studio, etc.). Subclasses supply the OpenAI client (pointed at the
@@ -32,6 +27,18 @@ export abstract class OpenAICompatibleRuntime implements AgentRuntime {
 
   constructor(client: OpenAI) {
     this.client = client;
+  }
+
+  // Per-step cost in micros. Override in subclasses where the global
+  // model pricing catalog doesn't apply — e.g. OllamaRuntime returns 0
+  // for free local inference, even though Ollama uses the same model
+  // names ('llama3.3:70b') that cost money on OpenRouter.
+  //
+  // Default implementation looks the model up in the pricing catalog;
+  // unknown models fall through to the conservative Opus-rate fallback
+  // (see pricing.ts).
+  protected computeCostMicros(model: string, usage: TokenUsage): number {
+    return usageToMicros(model, usage);
   }
 
   async *run(input: RunInput): AsyncIterable<RunStepEvent> {
@@ -135,7 +142,7 @@ export abstract class OpenAICompatibleRuntime implements AgentRuntime {
         inputTokens: usageRaw.prompt_tokens,
         outputTokens: usageRaw.completion_tokens,
       };
-      const costMicros = usageToMicros(input.model, usage);
+      const costMicros = this.computeCostMicros(input.model, usage);
       totalCostMicros += costMicros;
 
       // Normalize the assistant message into the same content-block shape

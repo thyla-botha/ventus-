@@ -147,6 +147,33 @@ describe('OllamaRuntime', () => {
       expect(createCalls[0]?.model).toBe('llama3.3:70b');
     });
 
+    it('reports costMicros=0 for local inference (does NOT fall through to the global Opus fallback)', async () => {
+      // Regression guard: before chunk 4 the OpenAI-compat base called
+      // usageToMicros directly, which would mis-price an unknown
+      // 'llama3.3:70b' tag at the conservative Opus fallback rate. Ollama
+      // must override computeCostMicros to keep cost accounting honest.
+      const { runtime } = makeRuntime([
+        {
+          choices: [
+            {
+              message: { role: 'assistant', content: 'free local run' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 100, completion_tokens: 50 },
+        },
+      ]);
+      const events = await collect(runtime.run(baseInput()));
+      const assistant = events.find((e) => e.type === 'assistant_message') as {
+        costMicros: number;
+      };
+      const completed = events.find((e) => e.type === 'completed') as {
+        totalCostMicros: number;
+      };
+      expect(assistant.costMicros).toBe(0);
+      expect(completed.totalCostMicros).toBe(0);
+    });
+
     it('surfaces SDK errors with the ollama provider label (not openrouter)', async () => {
       // Confirms providerLabel wiring: error messages must say "ollama"
       // so operators reading logs can tell which adapter failed.

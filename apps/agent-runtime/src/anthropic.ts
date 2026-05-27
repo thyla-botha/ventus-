@@ -5,13 +5,8 @@ import type {
   ToolResultBlockParam,
   ToolUseBlock,
 } from '@anthropic-ai/sdk/resources/messages.mjs';
-import type {
-  AgentRuntime,
-  RunInput,
-  RunStepEvent,
-  TokenUsage,
-} from './runtime.js';
-import { usageToMicros } from './runtime.js';
+import type { AgentRuntime, RunInput, RunStepEvent } from './runtime.js';
+import { usageToMicros, type TokenUsage } from './pricing.js';
 
 // Anthropic-backed runtime. Implements the AgentRuntime interface so callers
 // stay vendor-agnostic. The loop:

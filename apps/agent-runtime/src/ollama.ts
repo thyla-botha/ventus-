@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { OpenAICompatibleRuntime } from './openai-compatible.js';
+import type { TokenUsage } from './pricing.js';
 
 // OllamaRuntime — self-hosted / air-gapped inference.
 //
@@ -22,12 +23,14 @@ import { OpenAICompatibleRuntime } from './openai-compatible.js';
 // Cost-ceiling semantics: Ollama's /v1/chat/completions returns the
 // `usage` object (prompt_tokens + completion_tokens), so the base
 // class's strict usage check still applies. Cost-per-token is zero for
-// local inference, so VENTUS_COST_CEILING_MICROS becomes moot in
-// monetary terms — but the ceiling still works as a runaway-loop guard
-// rail because totalCostMicros grows by 0 each step and never trips,
-// meaning operators relying on it for loop bounds should use
-// `maxSteps` instead. (Documented here so nobody mistakes this for a
-// reliable cost cap on local runs.)
+// local inference, so this runtime overrides `computeCostMicros` to
+// return 0 — preventing the wildly-wrong global pricing fallback from
+// scoring a free local run as if it were Opus traffic. Operators who
+// need to budget against compute-time on a paid cluster should subclass
+// OllamaRuntime and override computeCostMicros with their own formula.
+//
+// One consequence: VENTUS_COST_CEILING_MICROS never trips on a pure
+// Ollama run. Use `maxSteps` as the runaway-loop guard rail instead.
 //
 // Model naming: pass tags like 'llama3.3:70b', 'qwen2.5:14b',
 // 'deepseek-r1:32b'. Whatever `ollama list` shows.
@@ -52,5 +55,13 @@ export class OllamaRuntime extends OpenAICompatibleRuntime {
     const apiKey =
       opts.apiKey ?? process.env.OLLAMA_API_KEY ?? 'ollama';
     super(new OpenAI({ apiKey, baseURL }));
+  }
+
+  // Local inference is free. Returning 0 here keeps the cost-ceiling
+  // accounting honest — without this, `usageToMicros` would fall through
+  // to the global Opus-rate fallback and score every local turn as if it
+  // had cost real money.
+  protected override computeCostMicros(_model: string, _usage: TokenUsage): number {
+    return 0;
   }
 }

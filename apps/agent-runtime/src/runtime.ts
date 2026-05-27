@@ -1,9 +1,25 @@
 // Vendor-agnostic agent runtime.
 //
 // Decouples agent definitions and the orchestration layer from any single LLM
-// vendor's SDK shape. Concrete implementations (AnthropicRuntime, future
-// BedrockRuntime, VertexRuntime) satisfy the same AgentRuntime interface so
-// switching providers does not require rewriting Skills or callers.
+// vendor's SDK shape. Concrete implementations (AnthropicRuntime,
+// OpenRouterRuntime, OllamaRuntime, future BedrockRuntime, VertexRuntime)
+// satisfy the same AgentRuntime interface so switching providers does not
+// require rewriting Skills or callers.
+
+// Pricing lives in pricing.ts. Re-exported here for back-compat with
+// callers that historically imported `usageToMicros`/`priceForModel` from
+// this file. New callers should import directly from './pricing.js'.
+export {
+  priceForModel,
+  usageToMicros,
+  registerModelPricing,
+  unregisterModelPricing,
+  setFallbackPricing,
+  getFallbackPricing,
+  hasModelPricing,
+  resetPricingForTests,
+} from './pricing.js';
+export type { ModelPricing, TokenUsage } from './pricing.js';
 
 export interface ToolDefinition {
   name: string;
@@ -74,63 +90,4 @@ export interface AgentRuntime {
   // providers — even with the same model name — are recognisably distinct.
   readonly provider: string;
   run(input: RunInput): AsyncIterable<RunStepEvent>;
-}
-
-// ----------------------------------------------------------------------------
-// Pricing. Approximate model pricing in micro-dollars per token.
-// Cached input tokens are billed at ~10% of standard input rate per Anthropic
-// caching docs at time of writing; verify before relying on these numbers.
-// ----------------------------------------------------------------------------
-interface ModelPricing {
-  inputMicrosPerToken: number;
-  outputMicrosPerToken: number;
-  cacheReadMicrosPerToken: number;
-  cacheWriteMicrosPerToken: number;
-}
-
-const PRICING: Record<string, ModelPricing> = {
-  'claude-opus-4-7': {
-    inputMicrosPerToken: 15,
-    outputMicrosPerToken: 75,
-    cacheReadMicrosPerToken: 1.5,
-    cacheWriteMicrosPerToken: 18.75,
-  },
-  'claude-sonnet-4-6': {
-    inputMicrosPerToken: 3,
-    outputMicrosPerToken: 15,
-    cacheReadMicrosPerToken: 0.3,
-    cacheWriteMicrosPerToken: 3.75,
-  },
-  'claude-haiku-4-5-20251001': {
-    inputMicrosPerToken: 1,
-    outputMicrosPerToken: 5,
-    cacheReadMicrosPerToken: 0.1,
-    cacheWriteMicrosPerToken: 1.25,
-  },
-};
-
-const FALLBACK_PRICING: ModelPricing = PRICING['claude-sonnet-4-6']!;
-
-export interface TokenUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadInputTokens?: number;
-  cacheCreationInputTokens?: number;
-}
-
-export function priceForModel(model: string): ModelPricing {
-  return PRICING[model] ?? FALLBACK_PRICING;
-}
-
-export function usageToMicros(model: string, usage: TokenUsage): number {
-  const p = priceForModel(model);
-  const cacheRead = usage.cacheReadInputTokens ?? 0;
-  const cacheWrite = usage.cacheCreationInputTokens ?? 0;
-  const rawInput = Math.max(0, usage.inputTokens - cacheRead - cacheWrite);
-  return Math.round(
-    rawInput * p.inputMicrosPerToken
-    + usage.outputTokens * p.outputMicrosPerToken
-    + cacheRead * p.cacheReadMicrosPerToken
-    + cacheWrite * p.cacheWriteMicrosPerToken,
-  );
 }

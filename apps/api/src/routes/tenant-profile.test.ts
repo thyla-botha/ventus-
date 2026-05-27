@@ -31,9 +31,15 @@ describe('GET /v1/tenant/profile', () => {
     await h.cleanup();
   });
 
-  it('returns 401 without tenant headers', async () => {
-    const res = await h.app.request('/v1/tenant/profile');
-    expect(res.status).toBe(401);
+  it('returns 401 without tenant headers when dev shim is off', async () => {
+    const prior = process.env.VENTUS_DEV_DEFAULT_TENANT;
+    delete process.env.VENTUS_DEV_DEFAULT_TENANT;
+    try {
+      const res = await h.app.request('/v1/tenant/profile');
+      expect(res.status).toBe(401);
+    } finally {
+      if (prior !== undefined) process.env.VENTUS_DEV_DEFAULT_TENANT = prior;
+    }
   });
 
   it('returns 404 when no profile is set', async () => {
@@ -66,13 +72,19 @@ describe('PUT /v1/tenant/profile', () => {
     await h.cleanup();
   });
 
-  it('returns 401 without tenant headers', async () => {
-    const res = await h.app.request('/v1/tenant/profile', {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ body: 'x' }),
-    });
-    expect(res.status).toBe(401);
+  it('returns 401 without tenant headers when dev shim is off', async () => {
+    const prior = process.env.VENTUS_DEV_DEFAULT_TENANT;
+    delete process.env.VENTUS_DEV_DEFAULT_TENANT;
+    try {
+      const res = await h.app.request('/v1/tenant/profile', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ body: 'x' }),
+      });
+      expect(res.status).toBe(401);
+    } finally {
+      if (prior !== undefined) process.env.VENTUS_DEV_DEFAULT_TENANT = prior;
+    }
   });
 
   it('returns 403 when caller is not an admin', async () => {
@@ -345,13 +357,19 @@ describe('PUT /v1/tenant/runtime', () => {
     await h.cleanup();
   });
 
-  it('returns 401 without tenant headers', async () => {
-    const res = await h.app.request('/v1/tenant/runtime', {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ provider: 'ollama', model: 'llama3.1:8b' }),
-    });
-    expect(res.status).toBe(401);
+  it('returns 401 without tenant headers when dev shim is off', async () => {
+    const prior = process.env.VENTUS_DEV_DEFAULT_TENANT;
+    delete process.env.VENTUS_DEV_DEFAULT_TENANT;
+    try {
+      const res = await h.app.request('/v1/tenant/runtime', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'ollama', model: 'llama3.1:8b' }),
+      });
+      expect(res.status).toBe(401);
+    } finally {
+      if (prior !== undefined) process.env.VENTUS_DEV_DEFAULT_TENANT = prior;
+    }
   });
 
   it('returns 403 when caller is not an admin', async () => {

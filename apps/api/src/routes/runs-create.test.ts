@@ -67,13 +67,19 @@ describe('POST /v1/runs', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('returns 401 without tenant headers', async () => {
-    const res = await app.request('/v1/runs', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ skillName: 'reply-drafter', message: 'hi' }),
-    });
-    expect(res.status).toBe(401);
+  it('returns 401 without tenant headers when dev shim is off', async () => {
+    const prior = process.env.VENTUS_DEV_DEFAULT_TENANT;
+    delete process.env.VENTUS_DEV_DEFAULT_TENANT;
+    try {
+      const res = await app.request('/v1/runs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ skillName: 'reply-drafter', message: 'hi' }),
+      });
+      expect(res.status).toBe(401);
+    } finally {
+      if (prior !== undefined) process.env.VENTUS_DEV_DEFAULT_TENANT = prior;
+    }
   });
 
   it('returns 400 for missing/invalid body', async () => {

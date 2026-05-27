@@ -42,21 +42,33 @@ export type ProposalStatus =
   | 'failed'
   | 'expired';
 
-// TODO(auth): trust boundary lives here for now — every server-side fetch
-// goes out with header-derived tenant/user that defaults to the dev tenant.
-// Before any real multi-tenant deployment this MUST be replaced with values
-// read from the request session (Supabase auth or equivalent), so that the
-// API's tenantContext middleware actually gates on authenticated state. See
-// also apps/api/src/middleware/tenant.ts and the matching prod TODO there.
+// Two auth modes — the verified path is preferred and dev shim is the
+// fallback for local development before a Supabase session is wired in.
+//
+// 1) Bearer token (preferred). Set VENTUS_API_BEARER (server-side env, never
+//    exposed to the browser) to a Supabase access token. Mint one locally
+//    with: pnpm --filter @ventus/api sign-dev-jwt. The API verifies it
+//    against SUPABASE_JWT_SECRET and reads tenant_id + user_role from
+//    custom claims, so asAdmin is a no-op on this path (the token itself
+//    decides the role).
+//
+// 2) Header shim (dev only). When VENTUS_API_BEARER is unset, fall back to
+//    x-tenant-id / x-user-id headers — only works against an API node with
+//    VENTUS_DEV_DEFAULT_TENANT=1. The asAdmin flag toggles x-user-role on
+//    this path. Production API nodes reject this path entirely.
+//
+// When real auth lands (Supabase session middleware in Next), this function
+// becomes "read the access token off the request session and pass it
+// through" — the structural shape stays the same.
 function authHeaders(opts: { asAdmin?: boolean } = {}): Record<string, string> {
+  const bearer = process.env.VENTUS_API_BEARER;
+  if (bearer) {
+    return { authorization: `Bearer ${bearer}` };
+  }
   const h: Record<string, string> = {
     'x-tenant-id': process.env.VENTUS_TENANT_ID ?? DEV_TENANT_ID,
     'x-user-id': process.env.VENTUS_USER_ID ?? DEV_USER_ID,
   };
-  // TODO(auth): admin role is currently header-asserted. Until real session
-  // claims land, the settings UI elevates the dev caller to admin for writes
-  // and admin diagnostics. Production callers MUST derive the role from
-  // verified JWT claims and drop the header path entirely.
   if (opts.asAdmin) h['x-user-role'] = 'admin';
   return h;
 }

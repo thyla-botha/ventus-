@@ -63,9 +63,18 @@ describe('GET /v1/skills', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('returns 401 without tenant headers', async () => {
-    const res = await app.request('/v1/skills');
-    expect(res.status).toBe(401);
+  it('returns 401 without tenant headers when dev shim is off', async () => {
+    // Dev shim is on by default in tests (see test-setup.ts) so missing
+    // headers fall back to DEV_TENANT_ID. Flip it off here to exercise the
+    // production gate: no Bearer + no shim = 401.
+    const prior = process.env.VENTUS_DEV_DEFAULT_TENANT;
+    delete process.env.VENTUS_DEV_DEFAULT_TENANT;
+    try {
+      const res = await app.request('/v1/skills');
+      expect(res.status).toBe(401);
+    } finally {
+      if (prior !== undefined) process.env.VENTUS_DEV_DEFAULT_TENANT = prior;
+    }
   });
 
   it('lists discovered skills', async () => {

@@ -77,9 +77,15 @@ describe('GET /v1/admin/pricing-coverage', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('returns 401 without tenant headers', async () => {
-    const res = await app.request('/v1/admin/pricing-coverage');
-    expect(res.status).toBe(401);
+  it('returns 401 without tenant headers when dev shim is off', async () => {
+    const prior = process.env.VENTUS_DEV_DEFAULT_TENANT;
+    delete process.env.VENTUS_DEV_DEFAULT_TENANT;
+    try {
+      const res = await app.request('/v1/admin/pricing-coverage');
+      expect(res.status).toBe(401);
+    } finally {
+      if (prior !== undefined) process.env.VENTUS_DEV_DEFAULT_TENANT = prior;
+    }
   });
 
   it('returns 403 to a non-admin member', async () => {
@@ -255,9 +261,15 @@ describe('GET /v1/admin/runtime-drift', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('returns 401 without tenant headers', async () => {
-    const res = await app.request('/v1/admin/runtime-drift');
-    expect(res.status).toBe(401);
+  it('returns 401 without tenant headers when dev shim is off', async () => {
+    const prior = process.env.VENTUS_DEV_DEFAULT_TENANT;
+    delete process.env.VENTUS_DEV_DEFAULT_TENANT;
+    try {
+      const res = await app.request('/v1/admin/runtime-drift');
+      expect(res.status).toBe(401);
+    } finally {
+      if (prior !== undefined) process.env.VENTUS_DEV_DEFAULT_TENANT = prior;
+    }
   });
 
   it('returns 403 to a non-admin member', async () => {

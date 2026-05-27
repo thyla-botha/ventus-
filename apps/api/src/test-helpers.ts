@@ -31,6 +31,8 @@ export async function makeHarness(opts: { tenantId?: string; userId?: string } =
   process.env.VENTUS_OUTBOX = join(dir, 'outbox.json');
   process.env.VENTUS_RUN_STORE = join(dir, 'runs.json');
   process.env.VENTUS_TENANT_PROFILE_STORE = join(dir, 'tenant-profiles.json');
+  // Dev header shim is enabled globally by test-setup.ts. Individual tests
+  // (e.g. tenant-jwt.test.ts) override it locally to exercise the JWT path.
   resetAppState();
 
   const tenantId = opts.tenantId ?? TEST_TENANT_A;

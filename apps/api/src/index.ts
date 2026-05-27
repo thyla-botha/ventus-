@@ -23,6 +23,35 @@ function parseEnvNumber(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+// Boot-time auth gate. The dev shim (x-tenant-id/x-user-id headers under
+// VENTUS_DEV_DEFAULT_TENANT=1) is a "trust the caller" path — fine for local
+// dev and the test suite, but a footgun in production. This guard ensures a
+// production deploy can never silently fall through to header trust:
+// - VENTUS_REQUIRE_VERIFIED_AUTH=1 (explicit), OR
+// - NODE_ENV=production (defensive default)
+// requires SUPABASE_JWT_SECRET to be set OR dev defaults to be off.
+const requireVerifiedAuth =
+  process.env.VENTUS_REQUIRE_VERIFIED_AUTH === '1' ||
+  process.env.NODE_ENV === 'production';
+if (requireVerifiedAuth) {
+  if (!process.env.SUPABASE_JWT_SECRET) {
+    // eslint-disable-next-line no-console
+    console.error(
+      'refusing to start: verified auth is required but SUPABASE_JWT_SECRET is unset. ' +
+        'Set the secret or unset VENTUS_REQUIRE_VERIFIED_AUTH / NODE_ENV=production.',
+    );
+    process.exit(1);
+  }
+  if (process.env.VENTUS_DEV_DEFAULT_TENANT === '1') {
+    // eslint-disable-next-line no-console
+    console.error(
+      'refusing to start: VENTUS_DEV_DEFAULT_TENANT=1 disables JWT verification. ' +
+        'Unset it in any environment that requires verified auth.',
+    );
+    process.exit(1);
+  }
+}
+
 const app = createApp();
 const port = Number(process.env.PORT ?? 8080);
 

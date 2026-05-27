@@ -10,24 +10,26 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "sign-dev-jwt": "tsx scripts/sign-dev-jwt.ts",
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@ventus/db": "workspace:*",
-    "@ventus/shared": "workspace:*",
-    "@ventus/audit": "workspace:*",
-    "@ventus/store": "workspace:*",
-    "@ventus/skills": "workspace:*",
-    "@ventus/agent-runtime": "workspace:*",
-    "@ventus/worker": "workspace:*",
-    "hono": "^4.6.0",
     "@hono/node-server": "^1.13.0",
     "@supabase/supabase-js": "^2.45.0",
+    "@ventus/agent-runtime": "workspace:*",
+    "@ventus/audit": "workspace:*",
+    "@ventus/db": "workspace:*",
+    "@ventus/shared": "workspace:*",
+    "@ventus/skills": "workspace:*",
+    "@ventus/store": "workspace:*",
+    "@ventus/worker": "workspace:*",
+    "hono": "^4.6.0",
+    "jose": "^6.2.3",
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "typescript": "^5.6.0",
+    "@types/node": "^22.7.0",
     "tsx": "^4.19.0",
-    "@types/node": "^22.7.0"
+    "typescript": "^5.6.0"
   }
 }

@@ -12,21 +12,29 @@ afterEach(async () => {
 });
 
 describe('tenantContext middleware', () => {
-  it('returns 401 when x-tenant-id is missing', async () => {
+  it('fills in DEV_TENANT_ID when x-tenant-id is missing under dev shim', async () => {
+    // Dev shim (VENTUS_DEV_DEFAULT_TENANT=1, set by makeHarness) replaces a
+    // missing tenant header with the zero-UUID so local development and
+    // smoke scripts don't have to remember the headers. The malformed-UUID
+    // and JWT-required tests below cover the security path.
     const res = await h.app.request('/v1/proposals', {
       headers: { 'x-user-id': h.userId },
     });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
   });
 
-  it('returns 401 when x-user-id is missing', async () => {
+  it('fills in DEV_USER_ID when x-user-id is missing under dev shim', async () => {
     const res = await h.app.request('/v1/proposals', {
       headers: { 'x-tenant-id': h.tenantId },
     });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
   });
 
-  it('returns 401 for malformed UUIDs', async () => {
+  it('returns 401 for malformed UUIDs (no silent fallback for invalid input)', async () => {
+    // Invalid values are NOT replaced by the dev defaults — the fallback
+    // only fires for empty/missing headers, never for present-but-malformed
+    // ones. A typo'd UUID is a programmer bug, not a "use the defaults"
+    // signal, so we want it loud.
     const res = await h.app.request('/v1/proposals', {
       headers: { 'x-tenant-id': 'not-a-uuid', 'x-user-id': h.userId },
     });

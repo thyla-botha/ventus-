@@ -637,4 +637,129 @@ describe('runAgent', () => {
     const row = await runs.get(result.runId);
     expect(row?.model).toBe('claude-haiku-4-5-20251001');
   });
+
+  // ---------- Gateway routing ----------
+  //
+  // When a GatewayClient is wired into RunAgentDeps, the run-agent loop must:
+  //   1. Advertise the gateway's tools alongside MOCK_TOOLS so the skill's
+  //      allowedTools list can match them (no false 'unknown tool' reports).
+  //   2. Dispatch tool calls whose name matches a gateway binding via the
+  //      client; everything else falls through to the audited local
+  //      executor.
+  //   3. NOT wrap gateway-routed calls in auditedExecutor — the gateway
+  //      records its own intent+outcome.
+  it('routes a gateway-bound tool call through the gateway client and not the local audit wrap', async () => {
+    const { randomBytes, randomUUID } = await import('node:crypto');
+    process.env.VENTUS_MCP_GATEWAY_SECRET = randomBytes(48).toString('base64');
+    const { GatewayClient } = await import('./gateway-client.js');
+
+    let gatewayHits = 0;
+    const client = new GatewayClient({
+      baseUrl: 'http://gateway.test',
+      tenantId: TENANT,
+      fetchImpl: async () => {
+        gatewayHits++;
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            intentId: randomUUID(),
+            data: { sent: true },
+            scrub: { counts: {}, redacted: false },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    });
+    client.registerTool({
+      toolName: 'send_email',
+      connector: 'gmail',
+      description: 'Send an email via Gmail.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          to: { type: 'string' },
+          subject: { type: 'string' },
+          body: { type: 'string' },
+        },
+        required: ['to', 'subject', 'body'],
+        additionalProperties: false,
+      },
+    });
+
+    const runtime = new FakeAgentRuntime({
+      turns: [
+        {
+          tools: [
+            {
+              name: 'send_email',
+              input: { to: 'a@b.com', subject: 's', body: 'b' },
+            },
+          ],
+        },
+        { text: 'sent.' },
+      ],
+    });
+
+    const result = await runAgent(
+      { proposals, audit, runs, runtime, gatewayClient: client },
+      {
+        skill: tier2Skill({ allowedTools: ['send_email'] }),
+        tenantId: TENANT,
+        agentId: AGENT_ID,
+        userMessage: 'send the email',
+      },
+    );
+
+    expect(result.status).toBe('completed');
+    expect(result.unknownTools).toEqual([]);
+    // Gateway received exactly one POST.
+    expect(gatewayHits).toBe(1);
+    // The local audit store has NO intent for send_email — the gateway owns
+    // those rows. (The local audit store is the runtime's, separate from the
+    // gateway's audit file.)
+    const intents = await audit.listIntents(TENANT);
+    expect(intents.find((i) => i.toolName === 'send_email')).toBeUndefined();
+  });
+
+  it('falls through to the local audited executor for tools NOT registered on the gateway', async () => {
+    const { randomBytes } = await import('node:crypto');
+    process.env.VENTUS_MCP_GATEWAY_SECRET = randomBytes(48).toString('base64');
+    const { GatewayClient } = await import('./gateway-client.js');
+
+    let gatewayHits = 0;
+    const client = new GatewayClient({
+      baseUrl: 'http://gateway.test',
+      tenantId: TENANT,
+      fetchImpl: async () => {
+        gatewayHits++;
+        return new Response('{}', { status: 200 });
+      },
+    });
+    // No tools registered — gateway is wired but knows nothing.
+
+    const runtime = new FakeAgentRuntime({
+      turns: [
+        // search_documents is a MOCK_TOOLS entry, not gateway-bound.
+        { tools: [{ name: 'search_documents', input: { query: 'x' } }] },
+        { text: 'ok.' },
+      ],
+    });
+
+    const result = await runAgent(
+      { proposals, audit, runs, runtime, gatewayClient: client },
+      {
+        skill: tier2Skill({ allowedTools: ['search_documents'] }),
+        tenantId: TENANT,
+        agentId: AGENT_ID,
+        userMessage: 'find it',
+      },
+    );
+
+    expect(result.status).toBe('completed');
+    // No gateway call — the local audited path handled it.
+    expect(gatewayHits).toBe(0);
+    // The local audit captured the tool call.
+    const intents = await audit.listIntents(TENANT);
+    expect(intents.find((i) => i.toolName === 'search_documents')).toBeDefined();
+  });
 });

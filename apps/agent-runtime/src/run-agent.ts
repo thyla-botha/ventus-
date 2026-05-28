@@ -9,6 +9,7 @@ import type {
   TenantProfileStore,
 } from '@ventus/store';
 import { auditedExecutor } from './audited-executor.js';
+import type { GatewayClient } from './gateway-client.js';
 import { MOCK_TOOLS, mockToolExecutor } from './mock-tools.js';
 import { CREATE_PROPOSAL_TOOL, withProposalTool } from './proposal-tool.js';
 import { RunTracker } from './run-tracker.js';
@@ -37,6 +38,12 @@ export interface RunAgentDeps {
   // at the top of the effective system prompt. Omit (or pass null) in tests
   // and the CLI to opt out — runs then behave exactly as they did pre-profile.
   tenantProfiles?: TenantProfileStore;
+  // Optional. When provided, tool calls whose name matches a binding on the
+  // client dispatch through the MCP gateway instead of the local mock
+  // executor. The gateway records its own audit_intent + audit_outcome rows
+  // for those calls, so gateway-routed tools are NOT also wrapped in
+  // auditedExecutor — double-wrapping would double-write the audit trail.
+  gatewayClient?: GatewayClient;
 }
 
 export interface RunAgentParams {
@@ -77,7 +84,7 @@ export async function startRunAgent(
   params: RunAgentParams,
 ): Promise<RunAgentHandle> {
   const model = params.modelOverride ?? params.skill.model;
-  const resolved = resolveRunPlan(params.skill);
+  const resolved = resolveRunPlan(params.skill, deps.gatewayClient);
   // Fetch the tenant profile (if a store is wired) BEFORE opening the row so
   // its hash can be folded into the snapshot and persisted on the row in one
   // shot. Failure to read the store is fatal here — we'd rather refuse to
@@ -133,12 +140,21 @@ interface ResolvedRunPlan {
 // startRunAgent can hash the resolved tool list BEFORE opening the Run row
 // AND driveRun can use the exact same plan when actually invoking the
 // runtime — guarantees the provenance hash matches what the loop ran.
-function resolveRunPlan(skill: Skill): ResolvedRunPlan {
+//
+// When a gatewayClient is wired, its registered tool definitions are
+// merged into the allow-list alongside MOCK_TOOLS. A skill's allowedTools
+// can therefore include gateway-bound names (e.g. 'send_email') without
+// being rejected as unknown. The manifest hash naturally folds them in —
+// two runs with different gateway tool sets get different snapshots.
+function resolveRunPlan(skill: Skill, gatewayClient?: GatewayClient): ResolvedRunPlan {
   const wantsProposal = skill.allowedTools.includes(CREATE_PROPOSAL_TOOL.name);
-  const tools: ToolDefinition[] = MOCK_TOOLS.filter((t) => skill.allowedTools.includes(t.name));
+  const gatewayDefs = gatewayClient?.toolDefinitions() ?? [];
+  const candidates: ToolDefinition[] = [...MOCK_TOOLS, ...gatewayDefs];
+  const tools: ToolDefinition[] = candidates.filter((t) => skill.allowedTools.includes(t.name));
   if (wantsProposal) tools.push(CREATE_PROPOSAL_TOOL);
   const knownToolNames = new Set<string>([
     ...MOCK_TOOLS.map((t) => t.name),
+    ...gatewayDefs.map((t) => t.name),
     CREATE_PROPOSAL_TOOL.name,
   ]);
   const unknownTools = skill.allowedTools.filter((n) => !knownToolNames.has(n));
@@ -251,9 +267,14 @@ async function driveRun(
   // and audit intents carry the exact hash that's persisted on the run.
   const contextSnapshotHash = run.contextSnapshotHash;
 
-  let executor: ToolExecutor = mockToolExecutor;
+  // Local executor: mock tools + (optional) proposal tool, wrapped in audit.
+  // The audit wrap is the in-process two-phase intent/outcome for tools that
+  // run inside the runtime. Gateway-routed tools are NOT wrapped here — the
+  // gateway records its own audit rows for those, and double-wrapping would
+  // double-write.
+  let local: ToolExecutor = mockToolExecutor;
   if (wantsProposal) {
-    executor = withProposalTool(executor, {
+    local = withProposalTool(local, {
       proposals: deps.proposals,
       tenantId,
       runId,
@@ -261,13 +282,23 @@ async function driveRun(
       contextSnapshotHash,
     });
   }
-  executor = auditedExecutor(executor, {
+  local = auditedExecutor(local, {
     audit: deps.audit,
     tenantId,
     runId,
     agentId,
     contextSnapshotHash,
   });
+
+  // Per-tool dispatch: gateway-bound names go through the client; everything
+  // else falls through to the audited local executor.
+  let executor: ToolExecutor = local;
+  if (deps.gatewayClient) {
+    const gateway = deps.gatewayClient.asExecutor();
+    const gatewayBound = new Set(deps.gatewayClient.toolNames());
+    executor = (name, input, ctx) =>
+      gatewayBound.has(name) ? gateway(name, input, ctx) : local(name, input, ctx);
+  }
 
   const tracker = new RunTracker();
   let lastEvent = '';

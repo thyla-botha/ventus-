@@ -1,5 +1,5 @@
 import { signGatewayRequest, type ConnectorType } from '@ventus/credentials';
-import type { ToolContext, ToolExecutor } from './runtime.js';
+import type { ToolContext, ToolDefinition, ToolExecutor } from './runtime.js';
 
 // Agent-runtime → MCP gateway client.
 //
@@ -33,6 +33,12 @@ export interface ConnectorToolBinding {
   // useful when the agent-facing name differs from what the connector
   // expects (e.g. 'send_email' on the agent → 'messages.send' at Gmail).
   remoteToolName?: string;
+  // Optional LLM-facing description + JSON schema. When provided, the
+  // run-agent loop can advertise this tool to the model alongside its
+  // local tools. When omitted, the binding still routes through the
+  // gateway but the caller is responsible for sourcing the schema.
+  description?: string;
+  inputSchema?: Record<string, unknown>;
 }
 
 export interface GatewayClientOptions {
@@ -96,6 +102,23 @@ export class GatewayClient {
 
   toolNames(): string[] {
     return Array.from(this.bindings.keys()).sort();
+  }
+
+  // ToolDefinitions for every binding that carries a description + schema.
+  // Bindings without those fields are routable but invisible to the model —
+  // typically because the schema is sourced elsewhere (e.g. a Skill manifest).
+  toolDefinitions(): ToolDefinition[] {
+    const out: ToolDefinition[] = [];
+    for (const b of this.bindings.values()) {
+      if (b.description && b.inputSchema) {
+        out.push({
+          name: b.toolName,
+          description: b.description,
+          inputSchema: b.inputSchema,
+        });
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async call(name: string, input: unknown, ctx: ToolContext): Promise<ToolCallResult> {

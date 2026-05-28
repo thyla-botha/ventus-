@@ -148,3 +148,93 @@ describe('scrub — recursive payload', () => {
     expect(scrub({ a: [], b: {} }).value).toEqual({ a: [], b: {} });
   });
 });
+
+describe('scrub — by-key redaction (CODEX LOW-9)', () => {
+  it('redacts a numeric card number under a sensitive key', () => {
+    // Pre-fix bug: numeric PII slipped through because the regex pipeline
+    // only inspected string leaves. By-key redaction fires on the field
+    // name regardless of leaf type.
+    const { value, report } = scrub({ cardNumber: 4111111111111111 });
+    expect((value as unknown as { cardNumber: string }).cardNumber).toBe('[REDACTED:by_key]');
+    expect(report.redacted).toBe(true);
+    expect(report.counts.by_key).toBe(1);
+  });
+
+  it('matches sensitive keys across case and separator styles', () => {
+    const { value } = scrub({
+      card_number: 4111111111111111,
+      'Card Number': 4111111111111111,
+      cardnumber: 4111111111111111,
+      CARDNUMBER: 4111111111111111,
+    });
+    for (const v of Object.values(value as Record<string, unknown>)) {
+      expect(v).toBe('[REDACTED:by_key]');
+    }
+  });
+
+  it('redacts a South African ID number stored as a numeric field', () => {
+    // Locale-specific PII. SA IDs are 13-digit numbers stored under
+    // saId/idNumber/nationalId in real broker/realestate systems.
+    const { value, report } = scrub({
+      saId: 9001011234084,
+      idNumber: '900101 1234 084',
+      nationalId: 9001011234084,
+    });
+    expect((value as unknown as { saId: string }).saId).toBe('[REDACTED:by_key]');
+    expect((value as { idNumber: string }).idNumber).toBe('[REDACTED:by_key]');
+    expect((value as unknown as { nationalId: string }).nationalId).toBe('[REDACTED:by_key]');
+    expect(report.counts.by_key).toBe(3);
+  });
+
+  it('falls back to by_key for string PII that no regex rule covers (e.g. 13-digit SA ID string)', () => {
+    // The credit_card regex DOES match a 16-digit run (separators are
+    // optional in the rule), so a 16-digit account number would tag as
+    // [REDACTED:credit_card] — that is the preferred precise sentinel.
+    // The by_key fallback fires for shapes no rule catches: a 13-digit
+    // SA ID stored as a string has no separators and is not 16 digits,
+    // so the regex pipeline misses it and by_key fills the gap.
+    const { value } = scrub({ saIdNumber: '9001011234084' });
+    expect((value as { saIdNumber: string }).saIdNumber).toBe('[REDACTED:by_key]');
+  });
+
+  it('prefers the precise regex sentinel over by_key when both could fire', () => {
+    // accountNumber + 16-digit credit-card-shaped string: regex wins,
+    // by_key never fires. The precise tag is more useful downstream.
+    const { value, report } = scrub({ accountNumber: '4111111111111111' });
+    expect((value as { accountNumber: string }).accountNumber).toBe('[REDACTED:credit_card]');
+    expect(report.counts.credit_card).toBe(1);
+    expect(report.counts.by_key ?? 0).toBe(0);
+  });
+
+  it('redacts nested objects/arrays wholesale under a sensitive key', () => {
+    const { value } = scrub({
+      passport: { country: 'ZA', number: 'A0123456' },
+      driversLicense: ['front.jpg', 'back.jpg'],
+    });
+    expect((value as { passport: unknown }).passport).toBe('[REDACTED:by_key]');
+    expect((value as { driversLicense: unknown }).driversLicense).toBe('[REDACTED:by_key]');
+  });
+
+  it('preserves null / empty-string under sensitive keys (no false sentinel for absent fields)', () => {
+    const { value, report } = scrub({ ssn: null as string | null, idNumber: '' });
+    expect((value as { ssn: string | null }).ssn).toBeNull();
+    expect((value as { idNumber: string }).idNumber).toBe('');
+    expect(report.redacted).toBe(false);
+  });
+
+  it('does NOT redact unrelated keys that happen to contain digits', () => {
+    // 'orderId', 'invoiceNumber', 'timestamp' are not sensitive — only
+    // the named PII keys are. Catches over-broad matchers.
+    const { value, report } = scrub({
+      orderId: 4111111111111111,
+      invoiceNumber: 'INV-4111',
+      timestamp: 1700000000000,
+    });
+    expect(value).toEqual({
+      orderId: 4111111111111111,
+      invoiceNumber: 'INV-4111',
+      timestamp: 1700000000000,
+    });
+    expect(report.redacted).toBe(false);
+  });
+});

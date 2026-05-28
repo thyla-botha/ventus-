@@ -32,7 +32,8 @@ type RedactionType =
   | 'credit_card'
   | 'iban'
   | 'jwt'
-  | 'api_key';
+  | 'api_key'
+  | 'by_key';
 
 interface Rule {
   type: RedactionType;
@@ -99,6 +100,70 @@ const RULES: readonly Rule[] = [
 
 const SENTINEL = (type: RedactionType): string => `[REDACTED:${type}]`;
 
+// CODEX LOW-9: structured PII frequently arrives as numeric leaves (e.g.
+// `{ cardNumber: 4111111111111111 }`, account numbers, government IDs).
+// The regex-only path above only matches strings, so a numeric leaf bypasses
+// every rule. We catch this by inspecting the field NAME: if the parent
+// object's key matches a known-sensitive name (case- and separator-
+// insensitive), we redact the value regardless of type.
+//
+// Naming style is normalized by stripping non-alphanumeric chars and
+// lowercasing: 'cardNumber', 'card_number', 'card-number', 'Card Number'
+// all reduce to 'cardnumber'.
+const SENSITIVE_KEY_NAMES_NORMALIZED: ReadonlySet<string> = new Set([
+  'cardnumber',
+  'creditcard',
+  'creditcardnumber',
+  'cvv',
+  'cvc',
+  'cardcvv',
+  'cardcvc',
+  'accountnumber',
+  'bankaccount',
+  'bankaccountnumber',
+  'routingnumber',
+  'iban',
+  'swift',
+  'bic',
+  'ssn',
+  'socialsecuritynumber',
+  // South African ID — primary target locale per project spec.
+  'said',
+  'saidnumber',
+  'idnumber',
+  'nationalid',
+  'nationalidnumber',
+  'passport',
+  'passportnumber',
+  'taxid',
+  'taxnumber',
+  'vatnumber',
+  'driverslicense',
+  'driverlicense',
+  'driverslicensenumber',
+  'phone',
+  'phonenumber',
+  'mobile',
+  'mobilenumber',
+  'msisdn',
+  'email',
+  'emailaddress',
+]);
+
+function normalizeKey(k: string): string {
+  return k.replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
+function isSensitiveKey(k: string): boolean {
+  return SENSITIVE_KEY_NAMES_NORMALIZED.has(normalizeKey(k));
+}
+
+function bumpByKeyCount(report?: ScrubReport): void {
+  if (!report) return;
+  report.counts.by_key = (report.counts.by_key ?? 0) + 1;
+  report.redacted = true;
+}
+
 export interface ScrubReport {
   // Total number of redactions applied, broken down by type. Useful for
   // operator dashboards ("we scrubbed 1,243 emails this week") and for
@@ -155,6 +220,51 @@ export function scrubValue<T>(value: T, report?: ScrubReport): T {
     if (proto !== Object.prototype && proto !== null) return value;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      // CODEX LOW-9: by-key redaction for known-sensitive field names.
+      // We prefer the regex pipeline's precise sentinels (email/phone/...)
+      // when a string value is recognizable — the type-specific tag is
+      // more useful for operator dashboards. By-key fires as a fallback
+      // when the regex misses (numeric PII, separator-stripped strings,
+      // BigInt IDs) so structured PII never escapes just because it
+      // arrived without the conventional formatting.
+      if (isSensitiveKey(k)) {
+        if (typeof v === 'string') {
+          // Try the precise regex pipeline first. If it caught anything,
+          // we keep that scrubbed value; otherwise we fall back to the
+          // generic by-key sentinel.
+          if (v === '') {
+            out[k] = v;
+          } else {
+            const beforeReport: ScrubReport = { counts: {}, redacted: false };
+            const scrubbed = scrubString(v, beforeReport);
+            if (beforeReport.redacted) {
+              // Roll the precise counts into the caller's report.
+              if (report) {
+                for (const [type, n] of Object.entries(beforeReport.counts) as Array<
+                  [RedactionType, number]
+                >) {
+                  report.counts[type] = (report.counts[type] ?? 0) + n;
+                }
+                report.redacted = true;
+              }
+              out[k] = scrubbed;
+            } else {
+              out[k] = SENTINEL('by_key');
+              bumpByKeyCount(report);
+            }
+          }
+          continue;
+        }
+        // Non-string values under a sensitive key: redact wholesale
+        // regardless of shape (numbers, bigints, arrays, objects).
+        if (v === null || v === undefined) {
+          out[k] = v;
+        } else {
+          out[k] = SENTINEL('by_key');
+          bumpByKeyCount(report);
+        }
+        continue;
+      }
       out[k] = scrubValue(v, report);
     }
     return out as T;

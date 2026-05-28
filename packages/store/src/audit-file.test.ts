@@ -2,7 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { FileAuditStore } from './audit-file.js';
+import { writeFile } from 'node:fs/promises';
+import { AuditOutcomeReferentialError, FileAuditStore } from './audit-file.js';
 import type { AuditIntentRecord } from './types.js';
 
 const TENANT_A = '00000000-0000-0000-0000-00000000000a';
@@ -99,26 +100,58 @@ describe('FileAuditStore', () => {
       expect(trail[0]!.intent.id).toBe(a.id);
     });
 
-    it('never pairs an intent with an outcome from a different tenant', async () => {
-      // Codex flagged: the outcome-map join must also be tenant-scoped.
-      // Without that, an outcome row with the same intentId but a different
-      // tenantId could mask an orphan when listAuditTrail is called for
-      // the original tenant. Construct that exact scenario: write an
-      // intent for tenant A, then write an outcome referencing that
-      // intentId BUT carrying tenant B's tenantId. The trail for tenant A
-      // must show the intent as orphan (outcome=null), not paired with B's
-      // cross-tenant outcome.
+    it('rejects a cross-tenant outcome at write time (CODEX HIGH-5)', async () => {
+      // Hardening: recordOutcome now refuses to insert a row whose
+      // (intentId, tenantId) does not match an existing intent. Before
+      // this gate, the test below seeded a cross-tenant outcome and
+      // verified listAuditTrail still scoped correctly; we now block
+      // the write at the source.
       const aIntent = await store.recordIntent(intent({ tenantId: TENANT_A }));
-      await store.recordOutcome({
+      await expect(
+        store.recordOutcome({
+          intentId: aIntent.id,
+          tenantId: TENANT_B,
+          status: 'executed',
+          durationMs: 1,
+        }),
+      ).rejects.toBeInstanceOf(AuditOutcomeReferentialError);
+      // Trail must NOT contain a stray B-owned outcome row.
+      const trail = await store.listAuditTrail({ tenantId: TENANT_A });
+      expect(trail).toHaveLength(1);
+      expect(trail[0]!.outcome).toBeNull();
+    });
+
+    it('listAuditTrail still scopes correctly if a legacy cross-tenant outcome row pre-exists on disk', async () => {
+      // Defense-in-depth: imagine a legacy file (from before the FK
+      // check) carrying a cross-tenant outcome row. The store cannot
+      // produce one going forward, but listAuditTrail must still scope.
+      const aIntent = await store.recordIntent(intent({ tenantId: TENANT_A }));
+      const path = join(dir, 'audit.json');
+      const raw = await import('node:fs/promises').then((fs) => fs.readFile(path, 'utf8'));
+      const legacy = JSON.parse(raw);
+      legacy.outcomes.push({
+        id: '00000000-0000-0000-0000-000000000099',
         intentId: aIntent.id,
         tenantId: TENANT_B,
         status: 'executed',
         durationMs: 1,
+        recordedAt: new Date().toISOString(),
       });
+      await writeFile(path, JSON.stringify(legacy), 'utf8');
       const trail = await store.listAuditTrail({ tenantId: TENANT_A });
       expect(trail).toHaveLength(1);
-      expect(trail[0]!.intent.id).toBe(aIntent.id);
       expect(trail[0]!.outcome).toBeNull();
+    });
+
+    it('rejects an outcome that names a non-existent intent (CODEX HIGH-5)', async () => {
+      await expect(
+        store.recordOutcome({
+          intentId: '99999999-9999-9999-9999-999999999999',
+          tenantId: TENANT_A,
+          status: 'executed',
+          durationMs: 1,
+        }),
+      ).rejects.toBeInstanceOf(AuditOutcomeReferentialError);
     });
 
     it('filters by resourceType and resourceId', async () => {

@@ -8,6 +8,23 @@ import type {
 } from './types.js';
 import { readJsonFile, writeJsonFile } from './_file-util.js';
 
+// Thrown by recordOutcome when (intentId, tenantId) does not match any
+// existing intent row. The Postgres+RLS swap turns this into a foreign
+// key + tenant-scoped policy enforcement; until then, the file store
+// performs the equivalent check inside the same write lock.
+export class AuditOutcomeReferentialError extends Error {
+  readonly code = 'AUDIT_OUTCOME_REFERENTIAL_ERROR';
+  constructor(
+    readonly intentId: string,
+    readonly tenantId: string,
+  ) {
+    super(
+      `recordOutcome: no intent ${intentId} for tenant ${tenantId} (cross-tenant or unknown intent)`,
+    );
+    this.name = 'AuditOutcomeReferentialError';
+  }
+}
+
 interface FileShape {
   version: 1;
   intents: AuditIntentRecord[];
@@ -61,7 +78,19 @@ export class FileAuditStore implements AuditStore {
   async recordOutcome(
     input: Omit<AuditOutcomeRecord, 'id' | 'recordedAt'>,
   ): Promise<AuditOutcomeRecord> {
+    // CODEX HIGH-5: enforce referential integrity inside the write lock.
+    // The intent referenced by intentId MUST exist AND MUST belong to the
+    // same tenant. Without this check, an outcome row could reference an
+    // intent that never existed (orphan) or — worse — an intent owned by
+    // a different tenant (cross-tenant audit pollution). The Postgres
+    // swap will replace this with a (intentId, tenantId) composite FK.
     return this.mutate((state) => {
+      const matched = state.intents.find(
+        (i) => i.id === input.intentId && i.tenantId === input.tenantId,
+      );
+      if (!matched) {
+        throw new AuditOutcomeReferentialError(input.intentId, input.tenantId);
+      }
       const rec: AuditOutcomeRecord = {
         ...input,
         id: randomUUID(),

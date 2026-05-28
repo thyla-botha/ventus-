@@ -1,4 +1,8 @@
-import { signGatewayRequest, type ConnectorType } from '@ventus/credentials';
+import {
+  normalizeTenantIdOrThrow,
+  signGatewayRequest,
+  type ConnectorType,
+} from '@ventus/credentials';
 import type { ToolContext, ToolDefinition, ToolExecutor } from './runtime.js';
 
 // Agent-runtime → MCP gateway client.
@@ -77,6 +81,11 @@ export class GatewayClient {
   private readonly bindings = new Map<string, ConnectorToolBinding>();
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  // CODEX MEDIUM-8: tenantId is normalized at construction so every signed
+  // request carries the canonical lowercase form. Without this, a caller
+  // that constructed with "...000A" would create a vault/audit partition
+  // disjoint from the API's lowercase reads.
+  private readonly tenantId: string;
 
   constructor(private readonly opts: GatewayClientOptions) {
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
@@ -86,6 +95,7 @@ export class GatewayClient {
     }
     if (!opts.baseUrl) throw new Error('GatewayClient: baseUrl required');
     if (!opts.tenantId) throw new Error('GatewayClient: tenantId required');
+    this.tenantId = normalizeTenantIdOrThrow(opts.tenantId, 'GatewayClient');
   }
 
   registerTool(binding: ConnectorToolBinding): this {
@@ -126,12 +136,16 @@ export class GatewayClient {
     if (!binding) {
       throw new Error(`tool not registered on gateway client: ${name}`);
     }
-    if (ctx.tenantId !== this.opts.tenantId) {
+    // Compare against the NORMALIZED tenantId. The ctx tenantId may also
+    // arrive in mixed case from upstream callers; we lowercase it for the
+    // comparison and rely on the upstream stack to have already validated
+    // its UUID shape (verified JWT path or tenantContext lowercase).
+    if (ctx.tenantId.toLowerCase() !== this.tenantId) {
       // Defence-in-depth. The client is bound to a tenant at construction;
       // a ToolContext that names a different tenant is a runtime bug, not
       // an attack, but we want it to be loud rather than silently signed.
       throw new Error(
-        `gateway client bound to tenant ${this.opts.tenantId}, refused to sign for ${ctx.tenantId}`,
+        `gateway client bound to tenant ${this.tenantId}, refused to sign for ${ctx.tenantId}`,
       );
     }
     const body = JSON.stringify({
@@ -144,7 +158,7 @@ export class GatewayClient {
     const signed = signGatewayRequest({
       method: 'POST',
       path: '/v1/tool-call',
-      tenantId: this.opts.tenantId,
+      tenantId: this.tenantId,
       body,
     });
     const ac = new AbortController();

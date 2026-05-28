@@ -249,6 +249,39 @@ describe('GatewayClient construction', () => {
     ).toThrow(/tenantId required/);
   });
 
+  it('rejects a non-UUID tenantId (CODEX MEDIUM-8)', () => {
+    expect(
+      () =>
+        new GatewayClient({
+          baseUrl: 'http://g',
+          tenantId: 'not-a-uuid',
+          fetchImpl: async () => new Response(''),
+        }),
+    ).toThrow(/not a valid UUID/);
+  });
+
+  it('normalizes a mixed-case tenantId at construction (CODEX MEDIUM-8)', async () => {
+    // The downstream vault and audit stores read tenantId as a raw string;
+    // mixed-case partitions are a footgun. Constructing with uppercase
+    // must produce a lowercase canonical form on the wire.
+    const MIXED = '00000000-0000-0000-0000-00000000000A';
+    let observedTenant: string | null = null;
+    const client = new GatewayClient({
+      baseUrl: 'http://g',
+      tenantId: MIXED,
+      fetchImpl: async (_url, init) => {
+        observedTenant =
+          (init?.headers as Record<string, string>)['x-ventus-gateway-tenant'] ?? null;
+        return jsonResponse(200, { ok: true, intentId: randomUUID(), data: {} });
+      },
+    });
+    client.registerTool({ toolName: 'send_email', connector: 'gmail' });
+    // Even if the caller's ToolContext also carries the uppercase form, the
+    // client compares using lowercase normalization.
+    await client.call('send_email', {}, { ...CTX, tenantId: MIXED });
+    expect(observedTenant).toBe(MIXED.toLowerCase());
+  });
+
   it('refuses duplicate tool registration', () => {
     const client = new GatewayClient({
       baseUrl: 'http://g',

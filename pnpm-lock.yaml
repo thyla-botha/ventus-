@@ -29,6 +29,9 @@ importers:
       '@ventus/audit':
         specifier: workspace:*
         version: link:../../packages/audit
+      '@ventus/credentials':
+        specifier: workspace:*
+        version: link:../../packages/credentials
       '@ventus/db':
         specifier: workspace:*
         version: link:../../packages/db

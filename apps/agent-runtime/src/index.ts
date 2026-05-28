@@ -16,6 +16,13 @@ export { RunTracker } from './run-tracker.js';
 export { MOCK_TOOLS, mockToolExecutor } from './mock-tools.js';
 export { auditedExecutor } from './audited-executor.js';
 export {
+  GatewayClient,
+  GatewayClientError,
+  type ConnectorToolBinding,
+  type GatewayClientOptions,
+  type ToolCallResult,
+} from './gateway-client.js';
+export {
   CREATE_PROPOSAL_TOOL,
   makeProposalToolExecutor,
   withProposalTool,

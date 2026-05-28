@@ -74,12 +74,28 @@ const ROLE_VALUES: readonly string[] = ['admin', 'member'];
 export async function verifyBearerToken(token: string): Promise<VerifiedClaims> {
   let payload: JWTPayload;
   try {
-    const verified = await jwtVerify(token, getSecret(), {
+    const verifyOpts: Parameters<typeof jwtVerify>[2] = {
       // Supabase issues with aud='authenticated' for signed-in users. An
       // anon-key token has aud='anon' — those callers are not real users
       // and must not pass our gate.
       audience: 'authenticated',
-    });
+      // CODEX MEDIUM-7: pin the algorithm to HS256. jose otherwise honours
+      // the token's `alg` header, which opens an algorithm-confusion
+      // window if the secret happens to be interpretable as a PEM (we
+      // never use one, but defense-in-depth — pin and stop worrying).
+      algorithms: ['HS256'],
+    };
+    // Issuer pinning. Optional but recommended in non-dev: set
+    // SUPABASE_JWT_ISSUER to `https://<project>.supabase.co/auth/v1` to
+    // require the token to come from your specific Supabase project.
+    // Without this, any token signed by anyone holding your secret (e.g.
+    // a stale copy that was rotated server-side but the new attacker
+    // still has the old) would pass aud=authenticated.
+    const issuer = process.env.SUPABASE_JWT_ISSUER;
+    if (issuer) {
+      verifyOpts.issuer = issuer;
+    }
+    const verified = await jwtVerify(token, getSecret(), verifyOpts);
     payload = verified.payload;
   } catch (err) {
     if (err instanceof JwtVerifyError) throw err;

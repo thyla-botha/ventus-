@@ -24,10 +24,12 @@ interface SignOpts {
   tenantId?: string;
   userRole?: 'admin' | 'member' | (string & {});
   audience?: string;
+  issuer?: string;
   expiresIn?: string;
   noTenantClaim?: boolean;
   noRoleClaim?: boolean;
   secret?: Uint8Array;
+  alg?: string;
 }
 
 async function signTestToken(opts: SignOpts = {}): Promise<string> {
@@ -35,11 +37,12 @@ async function signTestToken(opts: SignOpts = {}): Promise<string> {
     ...(opts.noTenantClaim ? {} : { tenant_id: opts.tenantId ?? TEST_TENANT_A }),
     ...(opts.noRoleClaim ? {} : { user_role: opts.userRole ?? 'member' }),
   })
-    .setProtectedHeader({ alg: 'HS256' })
+    .setProtectedHeader({ alg: opts.alg ?? 'HS256' })
     .setSubject(opts.sub ?? TEST_USER)
     .setAudience(opts.audience ?? 'authenticated')
     .setIssuedAt()
     .setExpirationTime(opts.expiresIn ?? '5m');
+  if (opts.issuer) builder.setIssuer(opts.issuer);
   return builder.sign(opts.secret ?? ENCODED_SECRET);
 }
 
@@ -173,6 +176,51 @@ describe('tenantContext — verified Bearer token path', () => {
       },
     });
     expect(res.status).toBe(401);
+  });
+
+  it('rejects a token signed with HS512 when verifier pins HS256 (CODEX MEDIUM-7)', async () => {
+    // Algorithm confusion: a token whose header says alg=HS512 must not be
+    // accepted by an HS256-pinned verifier even if the bytes happen to
+    // decode against the same secret. jose's algorithms allowlist enforces
+    // this; we test the contract.
+    const longerSecret = new TextEncoder().encode(
+      'this-is-a-long-enough-secret-for-hs512-padding-please-padding',
+    );
+    process.env.SUPABASE_JWT_SECRET = new TextDecoder().decode(longerSecret);
+    resetJwtSecretForTests();
+    const token = await signTestToken({ alg: 'HS512', secret: longerSecret });
+    const res = await h.app.request('/v1/proposals', {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects a token whose issuer does not match SUPABASE_JWT_ISSUER (CODEX MEDIUM-7)', async () => {
+    // When SUPABASE_JWT_ISSUER is set, the verifier requires it to match.
+    // Lets an operator pin tokens to a specific Supabase project even if
+    // the secret somehow leaked to a different project's signer.
+    const priorIssuer = process.env.SUPABASE_JWT_ISSUER;
+    process.env.SUPABASE_JWT_ISSUER = 'https://project-a.supabase.co/auth/v1';
+    try {
+      const wrongIssuerToken = await signTestToken({
+        issuer: 'https://project-b.supabase.co/auth/v1',
+      });
+      const res = await h.app.request('/v1/proposals', {
+        headers: { authorization: `Bearer ${wrongIssuerToken}` },
+      });
+      expect(res.status).toBe(401);
+
+      const rightIssuerToken = await signTestToken({
+        issuer: 'https://project-a.supabase.co/auth/v1',
+      });
+      const ok = await h.app.request('/v1/proposals', {
+        headers: { authorization: `Bearer ${rightIssuerToken}` },
+      });
+      expect(ok.status).toBe(200);
+    } finally {
+      if (priorIssuer === undefined) delete process.env.SUPABASE_JWT_ISSUER;
+      else process.env.SUPABASE_JWT_ISSUER = priorIssuer;
+    }
   });
 
   it('extracts the admin role from the token (no x-user-role spoofing)', async () => {

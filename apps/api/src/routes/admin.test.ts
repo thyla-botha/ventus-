@@ -188,6 +188,33 @@ describe('GET /v1/admin/pricing-coverage', () => {
     expect(body.ok).toBe(false);
   });
 
+  it('never returns another tenant\'s runtime override (CODEX HIGH-1)', async () => {
+    // Pre-fix bug: a tenant admin could read every other tenant's runtime
+    // provider/model via this endpoint because the report was platform-wide
+    // and only role-gated. We pin TENANT_B's override and then call as
+    // TENANT_A admin — the response must NOT contain TENANT_B.
+    const reg = new RuntimeRegistry();
+    reg.register('anthropic', () => new FakeAgentRuntime({ turns: [{ text: 'a' }] }));
+    reg.register('openrouter', () => new FakeAgentRuntime({ turns: [{ text: 'o' }] }));
+    setRuntimeRegistryForTests(reg);
+
+    const store = new FileTenantProfileStore(process.env.VENTUS_TENANT_PROFILE_STORE!);
+    await store.setRuntime(
+      TENANT_B,
+      { provider: 'openrouter', model: 'qwen/qwen3-72b' },
+      { updatedBy: 'admin-other' },
+    );
+
+    const res = await app.request('/v1/admin/pricing-coverage', { headers: ADMIN_HEADERS });
+    const body = await readJson<CoverageReport>(res);
+    const tenantEntries = body.entries.filter((e) => e.source === 'tenant');
+    // TENANT_A has no override; TENANT_B is hidden from TENANT_A's admin.
+    expect(tenantEntries).toHaveLength(0);
+    for (const e of body.entries) {
+      if (e.source === 'tenant') expect(e.identifier).not.toBe(TENANT_B);
+    }
+  });
+
   it('becomes ok=true after registering custom pricing for the unpriced model', async () => {
     // Operator workflow: see a gap, register pricing, gate flips green.
     const reg = new RuntimeRegistry();
@@ -337,6 +364,41 @@ describe('GET /v1/admin/runtime-drift', () => {
       runtimeUpdatedBy: 'admin-1',
     });
     expect(body.entries[0]?.runtimeUpdatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('never returns another tenant\'s drift row (CODEX HIGH-1)', async () => {
+    // Pre-fix bug: drift report listed every drifted tenant platform-wide.
+    // Pin two tenants with drifted providers, call as TENANT_A admin, the
+    // response must NOT include TENANT_B's drift row.
+    const driftReg = new RuntimeRegistry();
+    driftReg.register('anthropic', () => new FakeAgentRuntime({ turns: [{ text: 'a' }] }));
+    driftReg.register('ollama', () => new FakeAgentRuntime({ turns: [{ text: 'o' }] }));
+    setRuntimeRegistryForTests(driftReg);
+
+    const store = new FileTenantProfileStore(process.env.VENTUS_TENANT_PROFILE_STORE!);
+    await store.setRuntime(
+      TENANT_A,
+      { provider: 'ollama', model: 'llama3.1:8b' },
+      { updatedBy: 'admin-1' },
+    );
+    await store.setRuntime(
+      TENANT_B,
+      { provider: 'ollama', model: 'mistral-7b' },
+      { updatedBy: 'admin-2' },
+    );
+
+    // Drop ollama: both tenants drift, but the caller (TENANT_A) must only
+    // see its own row.
+    const shrunkReg = new RuntimeRegistry();
+    shrunkReg.register('anthropic', () => new FakeAgentRuntime({ turns: [{ text: 'a' }] }));
+    setRuntimeRegistryForTests(shrunkReg);
+    app = createApp();
+
+    const res = await app.request('/v1/admin/runtime-drift', { headers: ADMIN_HEADERS });
+    const body = await readJson<DriftReport>(res);
+    expect(body.entries).toHaveLength(1);
+    expect(body.entries[0]?.tenantId).toBe(TENANT_A);
+    for (const e of body.entries) expect(e.tenantId).not.toBe(TENANT_B);
   });
 
   it('drains the drift list after the operator repairs the override', async () => {

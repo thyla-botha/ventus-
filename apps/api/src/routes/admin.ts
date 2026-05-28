@@ -2,10 +2,11 @@ import { Hono } from 'hono';
 import { requireAdmin } from '../middleware/tenant.js';
 import { getAppState } from '../state.js';
 
-// Diagnostic endpoints for the platform operator. Mounted at /v1/admin. All
-// routes here are admin-gated — they read across tenants (pricing coverage
-// includes every tenant's runtime override) so a member-role caller must not
-// see them.
+// Diagnostic endpoints for tenant admins. Mounted at /v1/admin. Admin-gated
+// AND tenant-scoped: the reports filter tenant entries to the caller's own
+// tenantId so a tenant admin cannot enumerate other tenants' runtimes (CODEX
+// HIGH-1 fix). Platform-wide views are not exposed via HTTP — boot-time gates
+// and operator tooling call the unscoped form in-process.
 
 export const admin = new Hono();
 
@@ -24,7 +25,7 @@ admin.get('/pricing-coverage', async (c) => {
   const denied = requireAdmin(c);
   if (denied) return denied;
   const state = getAppState();
-  const report = await state.getPricingCoverageReport();
+  const report = await state.getPricingCoverageReport({ tenantId: c.var.tenantId });
   return c.json(report);
 });
 
@@ -42,6 +43,6 @@ admin.get('/runtime-drift', async (c) => {
   const denied = requireAdmin(c);
   if (denied) return denied;
   const state = getAppState();
-  const report = await state.getRuntimeDriftReport();
+  const report = await state.getRuntimeDriftReport({ tenantId: c.var.tenantId });
   return c.json(report);
 });

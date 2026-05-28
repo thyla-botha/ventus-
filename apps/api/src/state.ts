@@ -158,13 +158,27 @@ export interface AppState {
   // and by the optional boot-time gate (VENTUS_REQUIRE_PRICED_MODELS=1).
   // A run that costs out using the fallback price is a calibration risk —
   // the cost ceiling stops being a real number when the cost is wrong.
-  getPricingCoverageReport: () => Promise<PricingCoverageReport>;
+  //
+  // Tenant scoping: pass { tenantId } to restrict tenant entries to that
+  // tenant only — required for API admin routes so a tenant admin cannot
+  // enumerate other tenants' runtimes (CODEX HIGH-1). Skill entries are
+  // always included because they carry no tenant identity. Omitting the
+  // arg returns the platform-wide view, used only by the boot-time gate.
+  getPricingCoverageReport: (opts?: {
+    tenantId?: string;
+  }) => Promise<PricingCoverageReport>;
   // Runtime-drift report. Lists tenants whose stored runtime override
   // points at an unregistered provider. The next run for each of these
   // tenants would 503 (TenantRuntimeDriftError) — the report is the
   // operator-facing surface that lets them detect drift BEFORE the
   // tenant hits a failing run. Diagnostic counterpart to HIGH-1.
-  getRuntimeDriftReport: () => Promise<RuntimeDriftReport>;
+  //
+  // Tenant scoping: pass { tenantId } to restrict to that tenant only
+  // (CODEX HIGH-1). Omitting returns the platform-wide view — reserved
+  // for in-process operator tooling, NOT exposed to admin routes.
+  getRuntimeDriftReport: (opts?: {
+    tenantId?: string;
+  }) => Promise<RuntimeDriftReport>;
   // Lazy skill catalog. Loaded on first request — the directory is global to
   // the platform (not tenant-scoped). Returns a fresh promise on cache reset.
   getSkills: () => Promise<Skill[]>;
@@ -363,7 +377,7 @@ export function getAppState(): AppState {
     },
     hasRuntimeProvider: (provider: string) => runtimeRegistry.has(provider),
     listRuntimeProviders: () => runtimeRegistry.providers(),
-    getPricingCoverageReport: async () => {
+    getPricingCoverageReport: async (opts) => {
       // Two independent sources of model names:
       //   1. Skill frontmatter — each skill names a default model. We don't
       //      know which provider will route it at run time, so we just check
@@ -386,8 +400,10 @@ export function getAppState(): AppState {
         });
       }
       const profiles = await tenantProfileStore.list();
+      const scope = opts?.tenantId;
       for (const p of profiles) {
         if (!p.runtime) continue;
+        if (scope && p.tenantId !== scope) continue;
         const chargesForUsage = providerChargesForUsage(p.runtime.provider);
         const priced = !chargesForUsage || hasModelPricing(p.runtime.model);
         entries.push({
@@ -401,11 +417,13 @@ export function getAppState(): AppState {
       const unpricedCount = entries.reduce((n, e) => n + (e.priced ? 0 : 1), 0);
       return { entries, ok: unpricedCount === 0, unpricedCount };
     },
-    getRuntimeDriftReport: async () => {
+    getRuntimeDriftReport: async (opts) => {
       const profiles = await tenantProfileStore.list();
+      const scope = opts?.tenantId;
       const entries: RuntimeDriftEntry[] = [];
       for (const p of profiles) {
         if (!p.runtime) continue;
+        if (scope && p.tenantId !== scope) continue;
         if (runtimeRegistry.has(p.runtime.provider)) continue;
         entries.push({
           tenantId: p.tenantId,

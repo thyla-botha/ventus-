@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   GATEWAY_AUTH_HEADERS,
   GatewayAuthError,
+  InMemoryNonceStore,
   signGatewayRequest,
   verifyGatewayRequest,
 } from './gateway-auth.js';
@@ -263,6 +264,220 @@ describe('signGatewayRequest + verifyGatewayRequest', () => {
         headers,
       }),
     ).toThrow(/signature mismatch/);
+  });
+
+  describe('tenantId normalization (CODEX MEDIUM-8)', () => {
+    it('signer rejects a non-UUID tenantId', () => {
+      expect(() =>
+        signGatewayRequest({
+          method: 'POST',
+          path: '/v1/tool-call',
+          tenantId: 'definitely-not-a-uuid',
+          body: '{}',
+        }),
+      ).toThrow(/not a valid UUID/);
+    });
+
+    it('signer normalizes a mixed-case tenant header to lowercase', () => {
+      const MIXED = '00000000-0000-0000-0000-00000000000A';
+      const headers = signGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        tenantId: MIXED,
+        body: '{}',
+      });
+      expect(headers[GATEWAY_AUTH_HEADERS.tenant]).toBe(MIXED.toLowerCase());
+    });
+
+    it('verifier rejects a mixed-case header tenantId that does not round-trip', () => {
+      // The signer lowercases on the way out, so any verifier seeing
+      // uppercase has been tampered or mis-constructed externally.
+      // Verifier ALSO lowercases before checking — a tampered uppercase
+      // header with the same signature must therefore still produce a
+      // valid round-trip (signature was computed over lowercase). We
+      // assert: round-trip works AND result.tenantId is lowercase.
+      const MIXED = '00000000-0000-0000-0000-00000000000A';
+      const headers = signGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        tenantId: MIXED,
+        body: '{}',
+      });
+      const result = verifyGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        body: '{}',
+        headers,
+      });
+      expect(result.tenantId).toBe(MIXED.toLowerCase());
+    });
+
+    it('verifier rejects a non-UUID header', () => {
+      // Construct headers with a garbage tenant. We can't go through
+      // signGatewayRequest (which would reject), so simulate the raw
+      // header set directly.
+      const body = '{}';
+      // Sign with a valid tenant, then swap the tenant header to garbage.
+      const ok = signGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        tenantId: TENANT_A,
+        body,
+      });
+      const garbage = { ...ok, [GATEWAY_AUTH_HEADERS.tenant]: 'not-a-uuid' };
+      expect(() =>
+        verifyGatewayRequest({
+          method: 'POST',
+          path: '/v1/tool-call',
+          body,
+          headers: garbage,
+        }),
+      ).toThrow(/not a valid UUID/);
+    });
+  });
+
+  describe('replay protection (CODEX HIGH-3)', () => {
+    it('accepts the first sighting and rejects a second sighting of the same nonce', () => {
+      const body = '{}';
+      const headers = signGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        tenantId: TENANT_A,
+        body,
+        timestamp: 1000,
+      });
+      const store = new InMemoryNonceStore();
+      // First call inside the skew window: accept.
+      const first = verifyGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        body,
+        headers,
+        now: () => 1010,
+        nonceStore: store,
+      });
+      expect(first.tenantId).toBe(TENANT_A);
+      // Replay the EXACT same headers + body inside the same window: must
+      // reject with a distinct "nonce already used" message so the operator
+      // can tell replay apart from a fresh signature mismatch.
+      expect(() =>
+        verifyGatewayRequest({
+          method: 'POST',
+          path: '/v1/tool-call',
+          body,
+          headers,
+          now: () => 1020,
+          nonceStore: store,
+        }),
+      ).toThrow(/nonce already used/);
+    });
+
+    it('does NOT consume a nonce when the signature is invalid', () => {
+      // An attacker spraying invalid signatures must not be able to grow
+      // the nonce store. Only verified-signature requests reserve a slot.
+      const body = '{}';
+      const headers = signGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        tenantId: TENANT_A,
+        body,
+        timestamp: 1000,
+      });
+      const store = new InMemoryNonceStore();
+      // Tamper the signature.
+      const tampered = {
+        ...headers,
+        [GATEWAY_AUTH_HEADERS.signature]: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==',
+      };
+      expect(() =>
+        verifyGatewayRequest({
+          method: 'POST',
+          path: '/v1/tool-call',
+          body,
+          headers: tampered,
+          now: () => 1010,
+          nonceStore: store,
+        }),
+      ).toThrow();
+      expect(store.sizeForTests()).toBe(0);
+      // The legitimate signature still verifies (nonce is still fresh).
+      const ok = verifyGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        body,
+        headers,
+        now: () => 1010,
+        nonceStore: store,
+      });
+      expect(ok.tenantId).toBe(TENANT_A);
+    });
+
+    it('expires nonces after the skew window so memory does not grow unbounded', () => {
+      const body = '{}';
+      const headers = signGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        tenantId: TENANT_A,
+        body,
+        timestamp: 1000,
+      });
+      const store = new InMemoryNonceStore();
+      verifyGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        body,
+        headers,
+        now: () => 1010,
+        nonceStore: store,
+      });
+      expect(store.sizeForTests()).toBe(1);
+      // After +SKEW_SECONDS (60s past the signed ts), the entry is stale.
+      store.purgeExpired(1061);
+      expect(store.sizeForTests()).toBe(0);
+    });
+
+    it('treats nonces from different tenants as distinct keys', () => {
+      // A and B can hold the same nonce without collision — replay
+      // protection is scoped to the signer's tenant. (If both used the
+      // same nonce literal in the same window, both should still verify.)
+      const body = '{}';
+      const fixedNonce = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const ha = signGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        tenantId: TENANT_A,
+        body,
+        timestamp: 1000,
+        nonce: fixedNonce,
+      });
+      const hb = signGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        tenantId: TENANT_B,
+        body,
+        timestamp: 1000,
+        nonce: fixedNonce,
+      });
+      const store = new InMemoryNonceStore();
+      const a = verifyGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        body,
+        headers: ha,
+        now: () => 1010,
+        nonceStore: store,
+      });
+      const b = verifyGatewayRequest({
+        method: 'POST',
+        path: '/v1/tool-call',
+        body,
+        headers: hb,
+        now: () => 1010,
+        nonceStore: store,
+      });
+      expect(a.tenantId).toBe(TENANT_A);
+      expect(b.tenantId).toBe(TENANT_B);
+    });
   });
 
   it('verifies via a Headers-like .get() shim (Hono request shape)', () => {

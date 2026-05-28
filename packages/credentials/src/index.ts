@@ -15,10 +15,13 @@ export { scrub, scrubString, scrubValue, type ScrubReport } from './scrub.js';
 export {
   signGatewayRequest,
   verifyGatewayRequest,
+  normalizeTenantIdOrThrow,
   GatewayAuthError,
   GATEWAY_AUTH_HEADERS,
+  InMemoryNonceStore,
   type SignedHeaders,
   type SignInput,
   type VerifyInput,
   type VerifiedRequest,
+  type NonceStore,
 } from './gateway-auth.js';

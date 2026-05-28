@@ -295,6 +295,158 @@ describe('POST /v1/tool-call — operational failures', () => {
   });
 });
 
+describe('POST /v1/tool-call — codex review fixes', () => {
+  it('scrubs PII from the forwarder OUTPUT before audit + response (CODEX HIGH-2)', async () => {
+    // Pre-fix bug: input was scrubbed but raw connector responses (Gmail
+    // bodies, Slack messages) were written to audit AND returned to the
+    // agent unredacted, then fed straight back into the next LLM prompt.
+    // Set up a forwarder that emits PII in its DATA payload (independent
+    // of input). The response and audit must both be redacted.
+    await creds.set(TENANT_A, 'gmail', 'token');
+    const piiEmittingForwarder: ToolForwarder = {
+      connectorType: 'gmail',
+      async forward() {
+        return {
+          ok: true,
+          data: {
+            messages: [
+              {
+                from: 'leaker@example.com',
+                body: 'card: 4111 1111 1111 1111 phone: +1 415 555 9999',
+              },
+            ],
+          },
+        };
+      },
+    };
+    const app = makeApp(piiEmittingForwarder);
+    const res = await signedFetch(app, TENANT_A, {
+      connector: 'gmail',
+      tool: 'list_messages',
+      input: {},
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { data: unknown; scrub: { redacted: boolean } };
+    const serialized = JSON.stringify(json.data);
+    expect(serialized).not.toContain('leaker@example.com');
+    expect(serialized).not.toContain('4111 1111 1111 1111');
+    expect(serialized).not.toContain('+1 415 555 9999');
+    expect(serialized).toContain('[REDACTED:email]');
+    expect(serialized).toContain('[REDACTED:phone]');
+    expect(json.scrub.redacted).toBe(true);
+
+    // Audit outcome stores the scrubbed result too.
+    const trail = await audit.listAuditTrail({ tenantId: TENANT_A });
+    expect(JSON.stringify(trail[0]!.outcome?.result)).not.toContain('leaker@example.com');
+    expect(JSON.stringify(trail[0]!.outcome?.result)).toContain('[REDACTED:email]');
+  });
+
+  it('returns 500 (and never silently 200) when outcome write fails on success path (CODEX HIGH-4)', async () => {
+    // Orphan-on-success-path invariant: a successful side effect followed
+    // by a failed audit-outcome write must NOT be reported as 200 ok.
+    // We monkey-patch the audit store to make recordOutcome throw only
+    // on the SUCCESS path (status=executed). The intent and failed
+    // recordOutcome writes remain functional.
+    await creds.set(TENANT_A, 'gmail', 'token');
+    const realRecord = audit.recordOutcome.bind(audit);
+    audit.recordOutcome = async (input) => {
+      if (input.status === 'executed') throw new Error('disk full');
+      return realRecord(input);
+    };
+    try {
+      const app = makeApp();
+      const res = await signedFetch(app, TENANT_A, {
+        connector: 'gmail',
+        tool: 'send',
+        input: { to: 'a@b.com' },
+      });
+      expect(res.status).toBe(500);
+      const json = (await res.json()) as { ok: boolean; error: string };
+      expect(json.ok).toBe(false);
+      expect(json.error).toBe('audit_outcome_write_failed');
+      // Intent is still on disk; reconciler will see an orphan.
+      const trail = await audit.listAuditTrail({ tenantId: TENANT_A });
+      expect(trail).toHaveLength(1);
+      expect(trail[0]!.outcome).toBeNull();
+    } finally {
+      audit.recordOutcome = realRecord;
+    }
+  });
+
+  it('rejects a replayed signed request inside the skew window (CODEX HIGH-3)', async () => {
+    // A captured signed request must not produce a second billable side
+    // effect. We sign once, fire it twice — second call comes back 401.
+    await creds.set(TENANT_A, 'gmail', 'token');
+    const app = makeApp();
+    const body = JSON.stringify({ connector: 'gmail', tool: 'send', input: { to: 'a@b.com' } });
+    const headers = signGatewayRequest({
+      method: 'POST',
+      path: '/v1/tool-call',
+      tenantId: TENANT_A,
+      body,
+    });
+    const first = await app.request('/v1/tool-call', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body,
+    });
+    expect(first.status).toBe(200);
+    const second = await app.request('/v1/tool-call', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body,
+    });
+    expect(second.status).toBe(401);
+    const errBody = (await second.json()) as { error: string };
+    expect(errBody.error).toMatch(/nonce already used/);
+    // Audit must show ONLY the first call's intent + outcome — replay
+    // must not double-write either.
+    const trail = await audit.listAuditTrail({ tenantId: TENANT_A });
+    expect(trail).toHaveLength(1);
+    expect(trail[0]!.outcome?.status).toBe('executed');
+  });
+
+  it('does NOT leak forwarder error text to the response body (CODEX HIGH-6)', async () => {
+    // Pre-fix bug: forwarder.message (e.g. "401 Unauthorized url=https://gmail.googleapis.com/... auth=Bearer ya29.SECRET")
+    // was returned in the JSON response, which the agent loop appends as
+    // a tool-result block on the next LLM call. We log the raw error
+    // server-side and return only a generic 502.
+    await creds.set(TENANT_A, 'gmail', 'token');
+    const leakyForwarder: ToolForwarder = {
+      connectorType: 'gmail',
+      async forward() {
+        throw new Error(
+          'gmail 401: Bearer ya29.LEAKED_SECRET url=https://gmail.googleapis.com/?email=leak@x.com',
+        );
+      },
+    };
+    const app = makeApp(leakyForwarder);
+    const res = await signedFetch(app, TENANT_A, {
+      connector: 'gmail',
+      tool: 'send',
+      input: {},
+    });
+    expect(res.status).toBe(502);
+    const json = (await res.json()) as Record<string, unknown>;
+    // Response carries the generic shape only — no message, no token,
+    // no URL, no email leak.
+    expect(json.error).toBe('forwarder failed');
+    expect(json.message).toBeUndefined();
+    const serialized = JSON.stringify(json);
+    expect(serialized).not.toContain('ya29.LEAKED_SECRET');
+    expect(serialized).not.toContain('leak@x.com');
+    expect(serialized).not.toContain('gmail.googleapis.com');
+
+    // Audit row stores a SCRUBBED copy (PII redacted) — operators still
+    // get the diagnostic without storing raw PII.
+    const trail = await audit.listAuditTrail({ tenantId: TENANT_A });
+    expect(trail[0]!.outcome?.status).toBe('failed');
+    const auditedErr = trail[0]!.outcome?.errorText ?? '';
+    expect(auditedErr).not.toContain('leak@x.com');
+    expect(auditedErr).toContain('[REDACTED:email]');
+  });
+});
+
 describe('GET /health', () => {
   it('responds 200 without any auth', async () => {
     const app = makeApp();

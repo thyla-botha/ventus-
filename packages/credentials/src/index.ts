@@ -14,6 +14,11 @@ export {
   type ConnectorType,
   type LLMProviderCredentialKind,
 } from './store.js';
+export {
+  PostgresCredentialStore,
+  type PgQuerier,
+  type PgTenantRunner,
+} from './postgres-store.js';
 export { scrub, scrubString, scrubValue, type ScrubReport } from './scrub.js';
 export {
   signGatewayRequest,

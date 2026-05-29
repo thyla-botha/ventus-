@@ -1,6 +1,13 @@
 import { serve } from '@hono/node-server';
 import { logger } from 'hono/logger';
-import { FileCredentialStore, InMemoryNonceStore } from '@ventus/credentials';
+import {
+  FileCredentialStore,
+  InMemoryNonceStore,
+  PostgresCredentialStore,
+  type CredentialStore,
+  type PgTenantRunner,
+} from '@ventus/credentials';
+import { withTenant } from '@ventus/db';
 import { FileAuditStore } from '@ventus/store';
 import { createGatewayApp } from './app.js';
 import { EchoForwarder, ForwarderRegistry } from './forwarder.js';
@@ -45,7 +52,16 @@ if (!process.env.VENTUS_CREDENTIAL_MASTER_KEY) {
 }
 
 const stateDir = process.env.VENTUS_GATEWAY_STATE_DIR ?? '.gateway-state';
-const credentials = new FileCredentialStore(`${stateDir}/credentials.json`);
+// Credential storage: Postgres in production (DATABASE_URL set), file in
+// dev. Same switch as apps/api so a credential PUT through the API is
+// visible to a tool-call POST through the gateway when both processes
+// point at the same DB.
+const credentials: CredentialStore = process.env.DATABASE_URL
+  ? new PostgresCredentialStore({
+      withTenant: (ctx, fn) =>
+        withTenant(ctx, (sql) => fn(sql as unknown as Parameters<typeof fn>[0])),
+    } satisfies PgTenantRunner)
+  : new FileCredentialStore(`${stateDir}/credentials.json`);
 const audit = new FileAuditStore(`${stateDir}/audit.json`);
 // Gmail forwarder is real only when OAuth client envs are wired. Without
 // them we fall back to EchoForwarder so the gateway still boots in dev and

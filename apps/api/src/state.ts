@@ -23,9 +23,12 @@ import {
 } from '@ventus/agent-runtime';
 import {
   FileCredentialStore,
+  PostgresCredentialStore,
   credentialKindForProvider,
   type CredentialStore,
+  type PgTenantRunner,
 } from '@ventus/credentials';
+import { withTenant } from '@ventus/db';
 import { discoverSkills, type Skill } from '@ventus/skills';
 
 // Process-wide singletons for the file-backed stores. Every route handler
@@ -321,7 +324,17 @@ export function getAppState(): AppState {
   const credentialStorePath = process.env.VENTUS_CREDENTIAL_STORE
     ? resolve(process.env.VENTUS_CREDENTIAL_STORE)
     : CREDENTIAL_STORE_PATH;
-  const credentialStore = new FileCredentialStore(credentialStorePath);
+  // Credential storage: Postgres in production (DATABASE_URL set), file in
+  // dev/tests. The Postgres impl writes through @ventus/db's withTenant
+  // helper so every query runs in a transaction with app.tenant_id GUC
+  // set, enforcing RLS. The file impl is the dev/test fallback and is the
+  // only one with a process-wide write lock; the Postgres impl relies on
+  // the DB's row lock instead.
+  const credentialStore: CredentialStore = process.env.DATABASE_URL
+    ? new PostgresCredentialStore({
+        withTenant: (ctx, fn) => withTenant(ctx, (sql) => fn(sql as unknown as Parameters<typeof fn>[0])),
+      } satisfies PgTenantRunner)
+    : new FileCredentialStore(credentialStorePath);
 
   // Factor out the default-provider construction so getRuntime() and
   // resolveRuntimeForTenant() share one fallback path. The dev-fake

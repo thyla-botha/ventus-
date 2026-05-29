@@ -50,6 +50,19 @@ if (requireVerifiedAuth) {
     );
     process.exit(1);
   }
+  // Sibling-environment JWT bleed gate. The Supabase JWT secret is shared
+  // across every environment in the same Supabase project (preview, staging,
+  // prod). Without an issuer pin, a valid JWT minted in preview verifies in
+  // prod. SUPABASE_JWT_ISSUER must be set so the verifier rejects tokens
+  // whose `iss` doesn't match this environment's project URL.
+  if (!process.env.SUPABASE_JWT_ISSUER) {
+    // eslint-disable-next-line no-console
+    console.error(
+      'refusing to start: verified auth is required but SUPABASE_JWT_ISSUER is unset. ' +
+        'Pin the issuer (this env\'s Supabase project URL) to prevent sibling-env JWT bleed.',
+    );
+    process.exit(1);
+  }
 }
 
 const app = createApp();

@@ -54,15 +54,30 @@ const RULES: readonly Rule[] = [
     type: 'email',
     re: /[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,253}\.[a-z]{2,24}/gi,
   },
-  // Phone numbers. Two branches, both REQUIRE either an explicit + prefix
-  // or non-digit separators — a bare digit run is NEVER treated as a
-  // phone (too ambiguous; would eat order ids, SSN-like 9-digit
+  // Phone numbers. All branches REQUIRE either an explicit + prefix, the
+  // UK national '0' prefix with explicit separators, or US-style 3-3-4
+  // grouping with explicit separators — a bare digit run is NEVER treated
+  // as a phone (too ambiguous; would eat order ids, SSN-like 9-digit
   // sequences, and IBAN bodies).
   //   1. E.164: '+' followed by digits/separators, total length 9-19.
   //   2. US-style 3-3-4 with explicit separators between each group.
+  //   3. UK landline 3-group form anchored on the leading '0' national
+  //      prefix with explicit separators between every group. Covers the
+  //      common formats brokers see in free-text fields:
+  //        '020 7946 0958'  (London, 3-4-4)
+  //        '0207 946 0958'  (London alt, 4-3-4)
+  //        '0161 555 1234'  (Manchester, 4-3-4)
+  //        '0800 123 4567'  (toll-free, 4-3-4)
+  //      DECISION: UK MOBILES in the common '07700 900123' (5-6) two-group
+  //      form are NOT matched here — adding a two-group '0\d{4}\s\d{6}'
+  //      branch overlaps too readily with order-id-shaped strings under
+  //      free text. UK mobiles written in three-group form
+  //      ('07700 900 123') ARE caught by this branch. Mobiles arriving as
+  //      structured fields will be caught via the by-key fallback on
+  //      'mobile'/'mobilenumber'/'msisdn' keys.
   {
     type: 'phone',
-    re: /(?:\+\d[\d\s.()-]{7,17}\d|\b\d{3}[\s.()-]+\d{3}[\s.()-]+\d{4}\b)/g,
+    re: /(?:\+\d[\d\s.()-]{7,17}\d|\b\d{3}[\s.()-]+\d{3}[\s.()-]+\d{4}\b|\b0\d{1,4}[\s.-]\d{2,4}[\s.-]\d{3,4}\b)/g,
   },
   // US SSN with explicit dashes only. A bare 9-digit string is too
   // ambiguous (could be an order id, an invoice, etc.) — we match
@@ -197,28 +212,27 @@ export interface ScrubReport {
 export function scrubString(s: string, report?: ScrubReport): string {
   let out = s;
   for (const rule of RULES) {
-    let matched = false;
+    // Count INSIDE the replace callback so every match increments exactly
+    // once. The previous implementation counted sentinels in the output
+    // post-hoc and used Math.max against the prior tally, which caused
+    // a serious undercount across nested fields: three leaves each
+    // containing one email would report counts.email === 1 because the
+    // 'occurrences' read was scoped to the current string only, then
+    // Math.max blocked the additive update. Dashboards and anomaly
+    // detection ('why did this run scrub 47 cards?') depend on these
+    // counts being accurate, so we tally per-match here and add into
+    // the caller's report.
+    let count = 0;
     out = out.replace(rule.re, () => {
-      matched = true;
+      count += 1;
       return SENTINEL(rule.type);
     });
-    if (matched && report) {
-      // Count distinct match passes per rule. We don't track individual
-      // counts inside the replace callback because String.replace
-      // tracks them implicitly; we just bump by the difference in
-      // SENTINEL occurrences.
-      const before = report.counts[rule.type] ?? 0;
-      const occurrences = (out.match(new RegExp(escapeRe(SENTINEL(rule.type)), 'g')) ?? [])
-        .length;
-      report.counts[rule.type] = Math.max(before, occurrences);
+    if (count > 0 && report) {
+      report.counts[rule.type] = (report.counts[rule.type] ?? 0) + count;
       report.redacted = true;
     }
   }
   return out;
-}
-
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // Recursive value scrubber. Walks plain objects, arrays, and primitive

@@ -23,6 +23,42 @@ describe('scrubString — single field', () => {
     );
   });
 
+  it('redacts a UK landline in 3-4-4 form (020 7946 0958)', () => {
+    // Forex brokers handle UK clients routinely; free-text 'description'
+    // and 'notes' fields would leak the London landline shape without
+    // the UK branch. Anchored on the '0' national prefix with explicit
+    // separators so it doesn't broaden into bare-digit territory.
+    expect(scrubString('call 020 7946 0958 today')).toBe(
+      'call [REDACTED:phone] today',
+    );
+  });
+
+  it('redacts a UK landline in 4-3-4 form (0207 946 0958)', () => {
+    expect(scrubString('call 0207 946 0958 today')).toBe(
+      'call [REDACTED:phone] today',
+    );
+  });
+
+  it('redacts a UK Manchester landline (0161 555 1234)', () => {
+    expect(scrubString('call 0161 555 1234 today')).toBe(
+      'call [REDACTED:phone] today',
+    );
+  });
+
+  it('does NOT broaden into bare-digit territory (order 123456789 still safe)', () => {
+    // The UK branch requires a leading '0' AND explicit separators. The
+    // existing order-id case must still pass after the UK branch lands.
+    expect(scrubString('order 123456789 shipped')).toBe('order 123456789 shipped');
+  });
+
+  it('still redacts the existing E.164 US number after the UK branch lands', () => {
+    // Regression guard: adding the UK branch must not break the E.164
+    // alternation that was here before.
+    expect(scrubString('call +1 (415) 555-1234 today')).toBe(
+      'call [REDACTED:phone] today',
+    );
+  });
+
   it('redacts an SSN in ###-##-#### format', () => {
     expect(scrubString('SSN 123-45-6789 on file')).toBe(
       'SSN [REDACTED:ssn] on file',
@@ -154,8 +190,22 @@ describe('scrub — recursive payload', () => {
       flag: true,
     });
     expect(report.redacted).toBe(true);
-    expect(report.counts.email).toBeGreaterThanOrEqual(1);
+    // Three emails across nested leaves ('to', 'cc[0]', 'cc[1]') must
+    // all be counted. Earlier this assertion was weakened to
+    // toBeGreaterThanOrEqual(1) to mask a Math.max undercount in
+    // scrubString — the count is now additive per match.
+    expect(report.counts.email).toBe(3);
     expect(report.counts.phone).toBe(1);
+  });
+
+  it('reports an exact count for multiple regex matches inside one string field', () => {
+    // Single string field with three emails — the report must tally 3,
+    // not 1. Guards the Math.max undercount regression.
+    const { report } = scrub({
+      body: 'cc jane@example.com, bob@b.io, and eve@example.net',
+    });
+    expect(report.counts.email).toBe(3);
+    expect(report.redacted).toBe(true);
   });
 
   it('returns an unredacted report when payload has no PII', () => {

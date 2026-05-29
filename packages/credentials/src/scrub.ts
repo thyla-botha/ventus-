@@ -31,6 +31,7 @@ type RedactionType =
   | 'ssn'
   | 'credit_card'
   | 'iban'
+  | 'oauth_token'
   | 'jwt'
   | 'api_key'
   | 'by_key';
@@ -78,9 +79,28 @@ const RULES: readonly Rule[] = [
     re: /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g,
   },
   // IBAN: country code (2 letters) + check digits (2) + 10-30 alphanumeric.
+  // Real-world IBANs arrive in grouped 4-char form ('GB29 NWBK 6016 1331
+  // 9268 19') in invoices, CRMs, and prose; lowercasing is common in
+  // copy-paste. We accept either compact or grouped-4 form so prose like
+  // 'wire to GB29 NWBK ... monday' redacts the IBAN without eating
+  // following words — a flat '(?:\s?[A-Z0-9]){10,30}' would over-extend
+  // greedily through any trailing word under the i flag.
   {
     type: 'iban',
-    re: /\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b/g,
+    re: /\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,7}\s?[A-Z0-9]{1,4}\b/gi,
+  },
+  // OAuth bearer + Google access/refresh tokens. Placed BEFORE jwt because
+  // a Bearer-prefixed JWT is still primarily an OAuth credential — the
+  // Bearer span is the stronger leak signal (it implies "use this to call
+  // an API") and forwarder error text from provider SDKs (HIGH-6 source)
+  // routinely emits 'Authorization: Bearer ya29...' in raw form.
+  //   - Bearer <token>: 8+ chars of base64url-ish body, case-insensitive
+  //     on the keyword.
+  //   - ya29.<body>: Google OAuth2 access token sentinel.
+  //   - 1//0<body>: Google OAuth2 refresh token sentinel.
+  {
+    type: 'oauth_token',
+    re: /(?:\bBearer\s+[A-Za-z0-9._/+=~_-]{8,}|\bya29\.[A-Za-z0-9._/+=~_-]{16,}|\b1\/\/0[A-Za-z0-9._/+=~_-]{16,})/gi,
   },
   // JWT: three base64url segments separated by dots. The leading
   // 'eyJ' prefix is the b64-encoded '{"' that begins every JWT header,

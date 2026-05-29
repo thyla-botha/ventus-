@@ -54,6 +54,53 @@ describe('scrubString — single field', () => {
     );
   });
 
+  it('redacts an IBAN in grouped 4-char form (banks/invoices/CRMs)', () => {
+    // Pretty-printed IBANs are the dominant on-the-wire form.
+    expect(scrubString('wire to GB29 NWBK 6016 1331 9268 19 monday')).toBe(
+      'wire to [REDACTED:iban] monday',
+    );
+  });
+
+  it('redacts a lowercase IBAN (copy-paste lowering)', () => {
+    expect(scrubString('wire to gb29nwbk60161331926819 monday')).toBe(
+      'wire to [REDACTED:iban] monday',
+    );
+  });
+
+  it('redacts a Bearer-prefixed Google access token as oauth_token', () => {
+    // HIGH-6 motivation: forwarder error text from provider SDKs routinely
+    // surfaces 'Authorization: Bearer ya29...' in raw form.
+    const out = scrubString('auth: Bearer ya29.LEAKED_TOKEN_abc123 fail');
+    expect(out).toContain('[REDACTED:oauth_token]');
+    expect(out).not.toContain('ya29');
+    expect(out).not.toContain('LEAKED_TOKEN_abc123');
+  });
+
+  it('redacts a Bearer-prefixed JWT as oauth_token (Bearer prefix wins over jwt)', () => {
+    // The Bearer prefix is the stronger leak signal — an OAuth credential
+    // takes precedence over the bare-JWT tag.
+    const out = scrubString(
+      'header: Bearer eyJhbGciOiJIUzI1NiJ9.eyJ0ZW5hbnRfaWQiOiJhYmMifQ.signature123',
+    );
+    expect(out).toContain('[REDACTED:oauth_token]');
+    expect(out).not.toContain('[REDACTED:jwt]');
+    expect(out).not.toContain('eyJ');
+  });
+
+  it('redacts a bare Google OAuth2 access token (ya29.<body>)', () => {
+    const out = scrubString('access ya29.A0AfH6SMC_XYZ123456789 expired');
+    expect(out).toContain('[REDACTED:oauth_token]');
+    expect(out).not.toContain('ya29');
+    expect(out).not.toContain('A0AfH6SMC_XYZ123456789');
+  });
+
+  it('redacts a Google OAuth2 refresh token (1//0<body>)', () => {
+    const out = scrubString('refresh 1//09abcDEF1234567xyz token');
+    expect(out).toContain('[REDACTED:oauth_token]');
+    expect(out).not.toContain('1//0');
+    expect(out).not.toContain('9abcDEF1234567xyz');
+  });
+
   it('redacts a JWT', () => {
     const jwt =
       'eyJhbGciOiJIUzI1NiJ9.eyJ0ZW5hbnRfaWQiOiJhYmMiLCJzdWIiOiJ4eXoifQ.signature123';

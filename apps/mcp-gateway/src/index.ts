@@ -1,6 +1,6 @@
 import { serve } from '@hono/node-server';
 import { logger } from 'hono/logger';
-import { FileCredentialStore } from '@ventus/credentials';
+import { FileCredentialStore, InMemoryNonceStore } from '@ventus/credentials';
 import { FileAuditStore } from '@ventus/store';
 import { createGatewayApp } from './app.js';
 import { EchoForwarder, ForwarderRegistry } from './forwarder.js';
@@ -50,7 +50,35 @@ const forwarders = new ForwarderRegistry()
   .register(new EchoForwarder('clickup'))
   .register(new EchoForwarder('whatsapp'));
 
-const app = createGatewayApp({ credentials, audit, forwarders });
+// Nonce store wiring. The lazy purge in InMemoryNonceStore.has() is
+// effectively unreachable in production: nonces are randomBytes(16) so
+// the same key is never re-queried, and stale rows accumulate until OOM.
+// We schedule an explicit sweep here and gate prod boot to single-replica
+// only — multi-replica deployments share no Map and would let an attacker
+// replay a verified request through a sibling process.
+if (isProd && process.env.VENTUS_MCP_GATEWAY_SINGLE_REPLICA !== 'true') {
+  // eslint-disable-next-line no-console
+  console.error(
+    'FATAL: in-memory nonce store requires VENTUS_MCP_GATEWAY_SINGLE_REPLICA=true in production. ' +
+      'Multi-replica deployments need a shared store (Redis/DB-backed) — wire one via createGatewayApp({ nonceStore }).',
+  );
+  process.exit(1);
+}
+
+const nonceStore = new InMemoryNonceStore();
+const NONCE_SWEEP_INTERVAL_MS = 30_000;
+const nonceSweep = setInterval(() => {
+  nonceStore.purgeExpired(Math.floor(Date.now() / 1000));
+}, NONCE_SWEEP_INTERVAL_MS);
+nonceSweep.unref();
+
+// eslint-disable-next-line no-console
+console.log(
+  '[mcp-gateway] nonce backend: in-memory (single-replica). ' +
+    'For multi-replica deployments, supply a shared nonceStore.',
+);
+
+const app = createGatewayApp({ credentials, audit, forwarders, nonceStore });
 app.use('*', logger());
 
 const port = Number(process.env.PORT ?? 8081);

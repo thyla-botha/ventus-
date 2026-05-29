@@ -1,6 +1,7 @@
 import type { AgentRuntime } from './runtime.js';
 import { AnthropicRuntime } from './anthropic.js';
 import { OllamaRuntime } from './ollama.js';
+import { OpenAIRuntime } from './openai.js';
 import { OpenRouterRuntime } from './openrouter.js';
 
 // RuntimeRegistry — central seam for picking which AgentRuntime
@@ -118,6 +119,7 @@ export function buildDefaultRuntimeRegistry(): RuntimeRegistry {
   const reg = new RuntimeRegistry();
   reg.register('anthropic', () => new AnthropicRuntime());
   reg.register('ollama', () => new OllamaRuntime());
+  reg.register('openai', () => new OpenAIRuntime());
   reg.register('openrouter', () => new OpenRouterRuntime());
   return reg;
 }

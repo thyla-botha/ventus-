@@ -122,12 +122,13 @@ describe('RuntimeRegistry', () => {
 });
 
 describe('buildDefaultRuntimeRegistry', () => {
-  it('registers anthropic, ollama, and openrouter providers by default', () => {
+  it('registers anthropic, ollama, openai, and openrouter providers by default', () => {
     const reg = buildDefaultRuntimeRegistry();
     expect(reg.has('anthropic')).toBe(true);
     expect(reg.has('ollama')).toBe(true);
+    expect(reg.has('openai')).toBe(true);
     expect(reg.has('openrouter')).toBe(true);
-    expect(reg.providers()).toEqual(['anthropic', 'ollama', 'openrouter']);
+    expect(reg.providers()).toEqual(['anthropic', 'ollama', 'openai', 'openrouter']);
   });
 
   it('does NOT register the fake provider (fake is a test fixture, not a production provider)', () => {

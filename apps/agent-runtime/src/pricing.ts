@@ -71,6 +71,36 @@ const BUILTIN_PRICING: Record<string, ModelPricing> = {
     cacheWriteMicrosPerToken: 1.25,
   },
 
+  // OpenAI — direct (bare model ID, no route prefix). These are what the
+  // OpenAI API itself expects in `model`. Rates match OpenRouter's
+  // 'openai/...' entries because OpenRouter passes OpenAI's pricing through
+  // unchanged for the OpenAI route — but tenants on a direct OpenAI key
+  // skip OpenRouter's ~5.5% markup.
+  'gpt-4o': {
+    inputMicrosPerToken: 2.5,
+    outputMicrosPerToken: 10,
+    cacheReadMicrosPerToken: 1.25,
+    cacheWriteMicrosPerToken: 2.5,
+  },
+  'gpt-4o-mini': {
+    inputMicrosPerToken: 0.15,
+    outputMicrosPerToken: 0.6,
+    cacheReadMicrosPerToken: 0.075,
+    cacheWriteMicrosPerToken: 0.15,
+  },
+  'gpt-4.1': {
+    inputMicrosPerToken: 2,
+    outputMicrosPerToken: 8,
+    cacheReadMicrosPerToken: 0.5,
+    cacheWriteMicrosPerToken: 2,
+  },
+  'gpt-5': {
+    inputMicrosPerToken: 1.25,
+    outputMicrosPerToken: 10,
+    cacheReadMicrosPerToken: 0.125,
+    cacheWriteMicrosPerToken: 1.25,
+  },
+
   // OpenAI — via OpenRouter routes
   'openai/gpt-4o': {
     inputMicrosPerToken: 2.5,

@@ -23,3 +23,12 @@ export { FileProposalStore } from './proposal-file.js';
 export { FileAuditStore, AuditOutcomeReferentialError } from './audit-file.js';
 export { FileRunStore } from './run-file.js';
 export { FileTenantProfileStore } from './tenant-profile-file.js';
+export { PostgresRunStore } from './run-postgres.js';
+export { PostgresAuditStore } from './audit-postgres.js';
+export type {
+  PgQuerier,
+  PgRow,
+  PgTenantRunner,
+  PgAdminRunner,
+  PgFullRunner,
+} from './postgres-types.js';

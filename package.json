@@ -13,6 +13,7 @@
     "lint": "turbo run lint && pnpm lint:tenancy && pnpm lint:schema-store",
     "lint:tenancy": "node scripts/lint-tenancy.mjs",
     "lint:schema-store": "node scripts/lint-schema-store.mjs",
+    "db:migrate": "pnpm --filter @ventus/db migrate",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
     "clean": "turbo run clean && rm -rf node_modules"

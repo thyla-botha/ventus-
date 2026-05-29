@@ -32,6 +32,10 @@ const ALLOWED_ADMIN_IMPORTERS = new Set([
   // Service-role / admin client is allowed only here. Add paths deliberately.
   'packages/db/src/admin.ts',
   'apps/api/src/routes/tenants.ts', // tenant provisioning endpoint (future)
+  // PostgresRunStore needs withAdmin for the RunStore interface's
+  // tenant-less methods (by-id ops, reaper cross-tenant scan). state.ts
+  // is the audited boundary that constructs the store + injects the runner.
+  'apps/api/src/state.ts',
 ]);
 
 const ALLOWED_SUPABASE_CREATE_CLIENT = new Set([

@@ -8,7 +8,13 @@ import {
   type PgTenantRunner,
 } from '@ventus/credentials';
 import { withTenant } from '@ventus/db';
-import { FileAuditStore } from '@ventus/store';
+import {
+  FileAuditStore,
+  PostgresAuditStore,
+  type AuditStore,
+  type PgQuerier,
+  type PgTenantRunner as StorePgTenantRunner,
+} from '@ventus/store';
 import { createGatewayApp } from './app.js';
 import { EchoForwarder, ForwarderRegistry } from './forwarder.js';
 import {
@@ -62,7 +68,15 @@ const credentials: CredentialStore = process.env.DATABASE_URL
         withTenant(ctx, (sql) => fn(sql as unknown as Parameters<typeof fn>[0])),
     } satisfies PgTenantRunner)
   : new FileCredentialStore(`${stateDir}/credentials.json`);
-const audit = new FileAuditStore(`${stateDir}/audit.json`);
+// Audit storage: Postgres when DATABASE_URL is set so a tool-call POST
+// through the gateway writes intent/outcome rows to the same store the API
+// reads from. File otherwise. Matches the credentials swap above.
+const audit: AuditStore = process.env.DATABASE_URL
+  ? new PostgresAuditStore({
+      withTenant: (ctx, fn) =>
+        withTenant(ctx, (sql) => fn(sql as unknown as PgQuerier)),
+    } satisfies StorePgTenantRunner)
+  : new FileAuditStore(`${stateDir}/audit.json`);
 // Gmail forwarder is real only when OAuth client envs are wired. Without
 // them we fall back to EchoForwarder so the gateway still boots in dev and
 // the tool surface stays consistent — calls just stub out instead of

@@ -13,7 +13,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "clean": "rm -rf dist .turbo"
+    "clean": "rm -rf dist .turbo",
+    "migrate": "tsx scripts/migrate.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "typescript": "^5.6.0",
-    "@types/node": "^22.7.0"
+    "@types/node": "^22.7.0",
+    "tsx": "^4.19.0"
   }
 }

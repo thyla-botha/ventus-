@@ -6,7 +6,12 @@ import {
   FileProposalStore,
   FileRunStore,
   FileTenantProfileStore,
+  PostgresAuditStore,
+  PostgresRunStore,
   type AuditStore,
+  type PgFullRunner,
+  type PgQuerier,
+  type PgTenantRunner,
   type ProposalStore,
   type RunStore,
   type TenantProfileStore,
@@ -26,9 +31,18 @@ import {
   PostgresCredentialStore,
   credentialKindForProvider,
   type CredentialStore,
-  type PgTenantRunner,
+  type PgTenantRunner as CredentialsPgTenantRunner,
 } from '@ventus/credentials';
 import { withTenant } from '@ventus/db';
+// withAdmin is the RLS-bypassing query runner. We need it here because the
+// RunStore interface has tenant-less methods (get/complete/heartbeat/
+// requestCancel/reapIfStale by id; reaper list-all by status) — the file
+// store satisfies these by having no tenancy concept, but the Postgres
+// impl needs an admin-scoped query path. The wiring code is the audited
+// boundary: PostgresRunStore receives the runner via constructor injection
+// and limits admin use to documented control-plane methods.
+// CI: this file is on ALLOWED_ADMIN_IMPORTERS in scripts/lint-tenancy.mjs.
+import { withAdmin } from '@ventus/db/admin';
 import { discoverSkills, type Skill } from '@ventus/skills';
 
 // Process-wide singletons for the file-backed stores. Every route handler
@@ -333,8 +347,29 @@ export function getAppState(): AppState {
   const credentialStore: CredentialStore = process.env.DATABASE_URL
     ? new PostgresCredentialStore({
         withTenant: (ctx, fn) => withTenant(ctx, (sql) => fn(sql as unknown as Parameters<typeof fn>[0])),
-      } satisfies PgTenantRunner)
+      } satisfies CredentialsPgTenantRunner)
     : new FileCredentialStore(credentialStorePath);
+
+  // Runs + audit storage: Postgres in production (DATABASE_URL set), file in
+  // dev/tests. Same wiring pattern as the credentials swap above. The Run
+  // store uses a composite { withTenant, withAdmin } runner because the
+  // RunStore interface has tenant-less methods (get-by-id, reaper list-all)
+  // that need RLS-bypassing reads — documented in PostgresRunStore.
+  const runFullRunner: PgFullRunner = {
+    withTenant: (ctx, fn) =>
+      withTenant(ctx, (sql) => fn(sql as unknown as PgQuerier)),
+    withAdmin: (fn) => withAdmin((sql) => fn(sql as unknown as PgQuerier)),
+  };
+  const auditRunner: PgTenantRunner = {
+    withTenant: (ctx, fn) =>
+      withTenant(ctx, (sql) => fn(sql as unknown as PgQuerier)),
+  };
+  const runStore: RunStore = process.env.DATABASE_URL
+    ? new PostgresRunStore(runFullRunner)
+    : new FileRunStore(runsPath);
+  const auditStore: AuditStore = process.env.DATABASE_URL
+    ? new PostgresAuditStore(auditRunner)
+    : new FileAuditStore(auditPath);
 
   // Factor out the default-provider construction so getRuntime() and
   // resolveRuntimeForTenant() share one fallback path. The dev-fake
@@ -375,8 +410,8 @@ export function getAppState(): AppState {
 
   cached = {
     proposals: new FileProposalStore(proposals),
-    audit: new FileAuditStore(auditPath),
-    runs: new FileRunStore(runsPath),
+    audit: auditStore,
+    runs: runStore,
     tenantProfiles: tenantProfileStore,
     credentials: credentialStore,
     registry: buildLocalRegistry(outbox),

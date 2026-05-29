@@ -70,3 +70,18 @@ export function _internalAdminSupabase(): SupabaseClient {
   // cannot use withTenant(). CI flags new callers of this function.
   return getAdminSupabase();
 }
+
+// RLS-bypassing query runner. Used by the Postgres store adapters
+// (PostgresRunStore, etc.) for the tenant-less methods on the file-store
+// interface — by-id lookups where the caller doesn't pre-resolve a tenant,
+// and the reaper's cross-tenant scan. Every caller MUST be on the
+// ALLOWED_ADMIN_IMPORTERS list in scripts/lint-tenancy.mjs.
+//
+// The function shape mirrors `withTenant` so the wiring code can pass a
+// composite { withTenant, withAdmin } runner into the store constructor.
+export async function withAdmin<T>(
+  fn: (sql: postgres.Sql) => Promise<T>,
+): Promise<T> {
+  const sql = getAdminPool();
+  return fn(sql);
+}

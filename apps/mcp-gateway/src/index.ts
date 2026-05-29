@@ -4,6 +4,11 @@ import { FileCredentialStore, InMemoryNonceStore } from '@ventus/credentials';
 import { FileAuditStore } from '@ventus/store';
 import { createGatewayApp } from './app.js';
 import { EchoForwarder, ForwarderRegistry } from './forwarder.js';
+import {
+  GmailForwarder,
+  GoogleApiGmailClient,
+  GoogleOAuthRefresher,
+} from './forwarders/gmail.js';
 
 // MCP gateway entry. Boots HTTP server with file-backed stores in dev and
 // in production. Per the security contract:
@@ -42,8 +47,20 @@ if (!process.env.VENTUS_CREDENTIAL_MASTER_KEY) {
 const stateDir = process.env.VENTUS_GATEWAY_STATE_DIR ?? '.gateway-state';
 const credentials = new FileCredentialStore(`${stateDir}/credentials.json`);
 const audit = new FileAuditStore(`${stateDir}/audit.json`);
+// Gmail forwarder is real only when OAuth client envs are wired. Without
+// them we fall back to EchoForwarder so the gateway still boots in dev and
+// the tool surface stays consistent — calls just stub out instead of
+// hitting Google. PR 5 ships the onboarding flow that populates these.
+const gmailForwarder = process.env.GOOGLE_CLIENT_ID
+  ? new GmailForwarder({
+      credentials,
+      client: new GoogleApiGmailClient(),
+      refresher: new GoogleOAuthRefresher(),
+    })
+  : new EchoForwarder('gmail');
+
 const forwarders = new ForwarderRegistry()
-  .register(new EchoForwarder('gmail'))
+  .register(gmailForwarder)
   .register(new EchoForwarder('gdrive'))
   .register(new EchoForwarder('slack'))
   .register(new EchoForwarder('jira'))

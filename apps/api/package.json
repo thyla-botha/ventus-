@@ -18,6 +18,7 @@
     "@supabase/supabase-js": "^2.45.0",
     "@ventus/agent-runtime": "workspace:*",
     "@ventus/audit": "workspace:*",
+    "@ventus/credentials": "workspace:*",
     "@ventus/db": "workspace:*",
     "@ventus/shared": "workspace:*",
     "@ventus/skills": "workspace:*",

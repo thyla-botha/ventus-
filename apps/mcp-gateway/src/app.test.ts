@@ -235,6 +235,24 @@ describe('POST /v1/tool-call — validation', () => {
     });
     expect(res.status).toBe(400);
   });
+
+  it('rejects llm provider credential kinds as tool-call targets (PR 2/6)', async () => {
+    // 'llm_openai'/'llm_anthropic'/'llm_openrouter' are valid credential
+    // store kinds (they hold per-tenant LLM provider API keys), but they
+    // are NOT tool-call targets. A caller trying to "tool-call" a provider
+    // key must be refused at the schema boundary — otherwise the request
+    // would silently reach the forwarder registry and get a confusing
+    // 'no forwarder' 501 six steps deeper.
+    const app = makeApp();
+    for (const kind of ['llm_openai', 'llm_anthropic', 'llm_openrouter']) {
+      const res = await signedFetch(app, TENANT_A, {
+        connector: kind,
+        tool: 'send',
+        input: {},
+      });
+      expect(res.status).toBe(400);
+    }
+  });
 });
 
 describe('POST /v1/tool-call — operational failures', () => {

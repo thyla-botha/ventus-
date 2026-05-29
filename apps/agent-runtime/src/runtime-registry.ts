@@ -25,7 +25,16 @@ import { OpenRouterRuntime } from './openrouter.js';
 // (typically from env or admin config); per-tenant overrides land in a
 // follow-up chunk that extends TenantProfile with a runtime config block.
 
-export type RuntimeFactory = () => AgentRuntime;
+// Options threaded through from the orchestrator at create() time. Today
+// only `apiKey` flows here — used to inject a per-tenant LLM provider key
+// fetched from the vault, so different tenants on the same provider can
+// run under different keys / orgs / billing scopes. Factories that don't
+// take a key (ollama) ignore the option.
+export interface RuntimeFactoryOptions {
+  apiKey?: string;
+}
+
+export type RuntimeFactory = (opts?: RuntimeFactoryOptions) => AgentRuntime;
 
 // Normalize provider names to a single canonical form. Provider IDs are
 // stable machine names (used in audit hashes, run rows, env vars), so we
@@ -78,7 +87,11 @@ export class RuntimeRegistry {
   // Invokes the factory for `provider` and returns the AgentRuntime. Throws
   // if no factory is registered, listing the available providers so the
   // operator sees what they could have typed instead.
-  create(provider: string): AgentRuntime {
+  //
+  // `opts.apiKey` is the per-tenant LLM provider key (from the vault). When
+  // present, the factory hands it to the adapter constructor in place of
+  // the process-level env var. When absent, the factory falls back to env.
+  create(provider: string, opts?: RuntimeFactoryOptions): AgentRuntime {
     const key = normalize(provider, 'create');
     const factory = this.factories.get(key);
     if (!factory) {
@@ -87,7 +100,7 @@ export class RuntimeRegistry {
           `Available providers: ${this.providers().join(', ') || '(none)'}`,
       );
     }
-    return factory();
+    return factory(opts);
   }
 }
 
@@ -117,9 +130,15 @@ export function providerChargesForUsage(provider: string): boolean {
 // construct their own registry or call .override('fake', ...).
 export function buildDefaultRuntimeRegistry(): RuntimeRegistry {
   const reg = new RuntimeRegistry();
-  reg.register('anthropic', () => new AnthropicRuntime());
+  reg.register('anthropic', (opts) =>
+    opts?.apiKey ? new AnthropicRuntime(opts.apiKey) : new AnthropicRuntime(),
+  );
   reg.register('ollama', () => new OllamaRuntime());
-  reg.register('openai', () => new OpenAIRuntime());
-  reg.register('openrouter', () => new OpenRouterRuntime());
+  reg.register('openai', (opts) =>
+    new OpenAIRuntime(opts?.apiKey ? { apiKey: opts.apiKey } : {}),
+  );
+  reg.register('openrouter', (opts) =>
+    new OpenRouterRuntime(opts?.apiKey ? { apiKey: opts.apiKey } : {}),
+  );
   return reg;
 }

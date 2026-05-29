@@ -7,9 +7,12 @@ export {
 export {
   FileCredentialStore,
   isConnectorType,
+  isLLMProviderCredentialKind,
+  credentialKindForProvider,
   type CredentialStore,
   type CredentialMetadata,
   type ConnectorType,
+  type LLMProviderCredentialKind,
 } from './store.js';
 export { scrub, scrubString, scrubValue, type ScrubReport } from './scrub.js';
 export {

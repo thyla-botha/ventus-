@@ -20,6 +20,8 @@ const ENV_KEYS = [
   'VENTUS_RUNTIME_PROVIDER',
   'ANTHROPIC_API_KEY',
   'VENTUS_TENANT_PROFILE_STORE',
+  'VENTUS_CREDENTIAL_STORE',
+  'VENTUS_CREDENTIAL_MASTER_KEY',
   'VENTUS_DEV_FAKE_RUNTIME',
 ] as const;
 
@@ -199,6 +201,71 @@ describe('AppState.resolveRuntimeForTenant', () => {
     await expect(state.resolveRuntimeForTenant(TEST_TENANT)).rejects.toThrow(
       TenantRuntimeDriftError,
     );
+  });
+
+  it('passes the per-tenant API key from the vault into the runtime factory', async () => {
+    // PR 2: each tenant brings their own OpenAI/Anthropic/OpenRouter key.
+    // The resolver pulls the key from the credential store and threads it
+    // through to the factory; the factory hands it to the SDK constructor
+    // instead of falling back to the process-level env var.
+    process.env.VENTUS_CREDENTIAL_STORE = join(dir, 'credentials.json');
+    process.env.VENTUS_CREDENTIAL_MASTER_KEY = Buffer.from(
+      'k'.repeat(32),
+    ).toString('base64');
+
+    const observedKeys: Array<string | undefined> = [];
+    const fakeForKey = new FakeAgentRuntime({ turns: [{ text: 'with-key' }] });
+    const reg = new RuntimeRegistry();
+    reg.register('anthropic', () => new FakeAgentRuntime({ turns: [{ text: 'def' }] }));
+    reg.register('openai', (opts) => {
+      observedKeys.push(opts?.apiKey);
+      return fakeForKey;
+    });
+    setRuntimeRegistryForTests(reg);
+
+    const state = getAppState();
+    await state.tenantProfiles.setRuntime(
+      TEST_TENANT,
+      { provider: 'openai', model: 'gpt-4o-mini' },
+      { updatedBy: 'admin-1' },
+    );
+    await state.credentials.set(TEST_TENANT, 'llm_openai', 'sk-tenant-specific-key', {
+      updatedBy: 'admin-1',
+    });
+
+    const resolved = await state.resolveRuntimeForTenant(TEST_TENANT);
+    expect(resolved.runtime).toBe(fakeForKey);
+    expect(observedKeys).toEqual(['sk-tenant-specific-key']);
+  });
+
+  it('falls back to env var when the tenant has no stored key', async () => {
+    process.env.VENTUS_CREDENTIAL_STORE = join(dir, 'credentials.json');
+    process.env.VENTUS_CREDENTIAL_MASTER_KEY = Buffer.from(
+      'k'.repeat(32),
+    ).toString('base64');
+
+    const observedOpts: Array<unknown> = [];
+    const reg = new RuntimeRegistry();
+    reg.register('anthropic', () => new FakeAgentRuntime({ turns: [{ text: 'def' }] }));
+    reg.register('openai', (opts) => {
+      observedOpts.push(opts);
+      return new FakeAgentRuntime({ turns: [{ text: 'no-key' }] });
+    });
+    setRuntimeRegistryForTests(reg);
+
+    const state = getAppState();
+    await state.tenantProfiles.setRuntime(
+      TEST_TENANT,
+      { provider: 'openai', model: 'gpt-4o-mini' },
+      { updatedBy: 'admin-1' },
+    );
+    // No call to credentials.set() — vault is empty for this tenant.
+
+    await state.resolveRuntimeForTenant(TEST_TENANT);
+    // Factory is invoked with undefined opts so the adapter constructor
+    // falls back to process.env.OPENAI_API_KEY (or throws if missing —
+    // which is the right semantics for "no key anywhere").
+    expect(observedOpts).toEqual([undefined]);
   });
 
   it('runtimeOverride short-circuits the tenant lookup (test fixtures win)', async () => {

@@ -21,6 +21,11 @@ import {
   type AgentRuntime,
   type ExecutorRegistry,
 } from '@ventus/agent-runtime';
+import {
+  FileCredentialStore,
+  credentialKindForProvider,
+  type CredentialStore,
+} from '@ventus/credentials';
 import { discoverSkills, type Skill } from '@ventus/skills';
 
 // Process-wide singletons for the file-backed stores. Every route handler
@@ -64,6 +69,14 @@ const RUN_STORE_PATH = process.env.VENTUS_RUN_STORE
 const TENANT_PROFILE_PATH = process.env.VENTUS_TENANT_PROFILE_STORE
   ? resolve(process.env.VENTUS_TENANT_PROFILE_STORE)
   : resolve(ROOT, '.ventus/tenant-profiles.json');
+
+// Per-tenant credential vault. Shared with the mcp-gateway in deployments
+// where both run side-by-side — set VENTUS_CREDENTIAL_STORE to the same
+// path on both processes so a credential PUT through the API is visible
+// to a tool-call PROXY through the gateway and vice versa.
+const CREDENTIAL_STORE_PATH = process.env.VENTUS_CREDENTIAL_STORE
+  ? resolve(process.env.VENTUS_CREDENTIAL_STORE)
+  : resolve(ROOT, '.ventus/credentials.json');
 
 const SKILLS_DIR = process.env.VENTUS_SKILLS_DIR
   ? resolve(process.env.VENTUS_SKILLS_DIR)
@@ -123,6 +136,12 @@ export interface AppState {
   audit: AuditStore;
   runs: RunStore;
   tenantProfiles: TenantProfileStore;
+  // Per-tenant secrets vault. Today holds: connector OAuth tokens
+  // (gmail/slack/etc., consumed by mcp-gateway forwarders) AND
+  // per-tenant LLM provider API keys (llm_openai/llm_anthropic/
+  // llm_openrouter, consumed by resolveRuntimeForTenant when picking the
+  // runtime). Same encryption, same per-tenant subkey, same audit story.
+  credentials: CredentialStore;
   registry: ExecutorRegistry;
   // The AgentRuntime used when an HTTP request kicks off a run. Lazy because
   // AnthropicRuntime throws on construction without ANTHROPIC_API_KEY — we
@@ -299,6 +318,10 @@ export function getAppState(): AppState {
   const defaultProvider = (process.env.VENTUS_RUNTIME_PROVIDER ?? 'anthropic').trim() || 'anthropic';
 
   const tenantProfileStore = new FileTenantProfileStore(tenantProfilesPath);
+  const credentialStorePath = process.env.VENTUS_CREDENTIAL_STORE
+    ? resolve(process.env.VENTUS_CREDENTIAL_STORE)
+    : CREDENTIAL_STORE_PATH;
+  const credentialStore = new FileCredentialStore(credentialStorePath);
 
   // Factor out the default-provider construction so getRuntime() and
   // resolveRuntimeForTenant() share one fallback path. The dev-fake
@@ -342,6 +365,7 @@ export function getAppState(): AppState {
     audit: new FileAuditStore(auditPath),
     runs: new FileRunStore(runsPath),
     tenantProfiles: tenantProfileStore,
+    credentials: credentialStore,
     registry: buildLocalRegistry(outbox),
     getRuntime: () => defaultRuntime(),
     resolveRuntimeForTenant: async (tenantId: string) => {
@@ -355,8 +379,21 @@ export function getAppState(): AppState {
       const profile = await tenantProfileStore.get(tenantId);
       const cfg = profile?.runtime;
       if (cfg && runtimeRegistry.has(cfg.provider)) {
+        // Per-tenant API key, if any. The vault returns null when the
+        // tenant hasn't uploaded their own key — the factory then falls
+        // back to the process-level env var (OPENAI_API_KEY etc.), which
+        // is the right default for single-tenant deployments and dev.
+        // Providers that don't take an API key (ollama) skip this entirely.
+        const credentialKind = credentialKindForProvider(cfg.provider);
+        let apiKey: string | null = null;
+        if (credentialKind !== null) {
+          apiKey = await credentialStore.get(tenantId, credentialKind);
+        }
         return {
-          runtime: runtimeRegistry.create(cfg.provider),
+          runtime: runtimeRegistry.create(
+            cfg.provider,
+            apiKey ? { apiKey } : undefined,
+          ),
           modelOverride: cfg.model,
         };
       }

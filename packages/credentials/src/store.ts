@@ -20,7 +20,22 @@ import { readJsonFile, writeJsonFile } from './_file-util.js';
 // other file-backed stores. Sufficient for the single-API-node story; a
 // future Postgres adapter takes the per-row lock.
 
-export type ConnectorType = 'gmail' | 'gdrive' | 'slack' | 'jira' | 'clickup' | 'whatsapp';
+// `ConnectorType` is the historical name; the union now also covers
+// per-tenant LLM provider API keys ('llm_openai' etc.). They live in the
+// same encrypted store because the operational requirements are identical
+// (per-tenant, AES-256-GCM, audited rotation). The mcp-gateway rejects
+// 'llm_*' values at the ConnectorEnum boundary — only forwarder-backed
+// connectors are valid tool-call targets.
+export type ConnectorType =
+  | 'gmail'
+  | 'gdrive'
+  | 'slack'
+  | 'jira'
+  | 'clickup'
+  | 'whatsapp'
+  | 'llm_openai'
+  | 'llm_anthropic'
+  | 'llm_openrouter';
 
 const CONNECTOR_TYPES: readonly ConnectorType[] = [
   'gmail',
@@ -29,10 +44,46 @@ const CONNECTOR_TYPES: readonly ConnectorType[] = [
   'jira',
   'clickup',
   'whatsapp',
+  'llm_openai',
+  'llm_anthropic',
+  'llm_openrouter',
 ];
 
 export function isConnectorType(s: string): s is ConnectorType {
   return (CONNECTOR_TYPES as readonly string[]).includes(s);
+}
+
+// The subset of ConnectorType that represents an LLM provider API key.
+// Use this when wiring tenant runtime resolution — keep tool-call paths
+// on the narrower ToolConnectorType.
+export type LLMProviderCredentialKind =
+  | 'llm_openai'
+  | 'llm_anthropic'
+  | 'llm_openrouter';
+
+const LLM_PROVIDER_KINDS: readonly LLMProviderCredentialKind[] = [
+  'llm_openai',
+  'llm_anthropic',
+  'llm_openrouter',
+];
+
+export function isLLMProviderCredentialKind(
+  s: string,
+): s is LLMProviderCredentialKind {
+  return (LLM_PROVIDER_KINDS as readonly string[]).includes(s);
+}
+
+// Map a runtime registry provider name ('openai', 'anthropic', 'openrouter')
+// to its credential kind. Returns null for providers that don't take an API
+// key in the vault (e.g. 'ollama' uses a server URL, not a secret).
+export function credentialKindForProvider(
+  provider: string,
+): LLMProviderCredentialKind | null {
+  const p = provider.trim().toLowerCase();
+  if (p === 'openai') return 'llm_openai';
+  if (p === 'anthropic') return 'llm_anthropic';
+  if (p === 'openrouter') return 'llm_openrouter';
+  return null;
 }
 
 // Public record — what callers see when they LIST credentials. The

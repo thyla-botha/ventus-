@@ -437,3 +437,198 @@ describe('GET /v1/admin/runtime-drift', () => {
     expect(repairedBody.entries).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// LLM provider key management
+//
+// PUT/GET/DELETE /v1/admin/llm-providers/:provider/key
+//
+// Per-tenant API keys for openai/anthropic/openrouter, stored in the same
+// encrypted vault as connector OAuth tokens. The plaintext key never appears
+// in the audit log or any HTTP response. resolveRuntimeForTenant consumes
+// the stored key when picking the runtime so the tenant runs under their
+// own billing scope.
+
+describe('LLM provider key endpoints', () => {
+  let dir: string;
+  let app: ReturnType<typeof createApp>;
+  let priorMaster: string | undefined;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'ventus-llmkey-'));
+    process.env.VENTUS_SKILLS_DIR = dir;
+    process.env.VENTUS_PROPOSAL_STORE = join(dir, 'proposals.json');
+    process.env.VENTUS_AUDIT_STORE = join(dir, 'audit.json');
+    process.env.VENTUS_OUTBOX = join(dir, 'outbox.json');
+    process.env.VENTUS_RUN_STORE = join(dir, 'runs.json');
+    process.env.VENTUS_TENANT_PROFILE_STORE = join(dir, 'tenant-profiles.json');
+    process.env.VENTUS_CREDENTIAL_STORE = join(dir, 'credentials.json');
+    priorMaster = process.env.VENTUS_CREDENTIAL_MASTER_KEY;
+    // 32-byte master key, base64-encoded, fresh per test.
+    process.env.VENTUS_CREDENTIAL_MASTER_KEY = Buffer.from(
+      'k'.repeat(32),
+    ).toString('base64');
+    resetAppState();
+    setRuntimeRegistryForTests(null);
+    resetPricingForTests();
+    app = createApp();
+  });
+
+  afterEach(async () => {
+    delete process.env.VENTUS_SKILLS_DIR;
+    delete process.env.VENTUS_PROPOSAL_STORE;
+    delete process.env.VENTUS_AUDIT_STORE;
+    delete process.env.VENTUS_OUTBOX;
+    delete process.env.VENTUS_RUN_STORE;
+    delete process.env.VENTUS_TENANT_PROFILE_STORE;
+    delete process.env.VENTUS_CREDENTIAL_STORE;
+    if (priorMaster === undefined) delete process.env.VENTUS_CREDENTIAL_MASTER_KEY;
+    else process.env.VENTUS_CREDENTIAL_MASTER_KEY = priorMaster;
+    resetAppState();
+    setRuntimeRegistryForTests(null);
+    resetPricingForTests();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('PUT requires admin role', async () => {
+    const res = await app.request('/v1/admin/llm-providers/openai/key', {
+      method: 'PUT',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'sk-test-1234567890' }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('PUT rejects an unknown provider', async () => {
+    const res = await app.request('/v1/admin/llm-providers/notarealthing/key', {
+      method: 'PUT',
+      headers: { ...ADMIN_HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'sk-test-1234567890' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('PUT rejects a provider that does not take an API key (ollama)', async () => {
+    const res = await app.request('/v1/admin/llm-providers/ollama/key', {
+      method: 'PUT',
+      headers: { ...ADMIN_HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'sk-test-1234567890' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('PUT rejects an apiKey shorter than 8 chars', async () => {
+    const res = await app.request('/v1/admin/llm-providers/openai/key', {
+      method: 'PUT',
+      headers: { ...ADMIN_HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'short' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('PUT stores the key, returns metadata only, and never echoes the key back', async () => {
+    const apiKey = 'sk-test-abcdef1234567890';
+    const res = await app.request('/v1/admin/llm-providers/openai/key', {
+      method: 'PUT',
+      headers: { ...ADMIN_HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.provider).toBe('openai');
+    expect(body.updatedAt).toBeTypeOf('string');
+    // Critical: the plaintext key must NOT be in the response.
+    expect(JSON.stringify(body)).not.toContain(apiKey);
+  });
+
+  it('audit row for PUT does not contain the plaintext key', async () => {
+    const apiKey = 'sk-canary-shouldnt-leak-1234567890';
+    const res = await app.request('/v1/admin/llm-providers/openai/key', {
+      method: 'PUT',
+      headers: { ...ADMIN_HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey }),
+    });
+    expect(res.status).toBe(200);
+    const auditRaw = JSON.stringify(
+      await readJson(
+        await app.request('/v1/audit', { headers: ADMIN_HEADERS }),
+      ),
+    );
+    expect(auditRaw).not.toContain(apiKey);
+    // We should see the action recorded though.
+    expect(auditRaw).toContain('set_llm_provider_key');
+  });
+
+  it('GET lists configured providers (metadata only) for the caller tenant', async () => {
+    // Set keys for both openai and anthropic.
+    await app.request('/v1/admin/llm-providers/openai/key', {
+      method: 'PUT',
+      headers: { ...ADMIN_HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'sk-openai-test-1234567890' }),
+    });
+    await app.request('/v1/admin/llm-providers/anthropic/key', {
+      method: 'PUT',
+      headers: { ...ADMIN_HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'sk-ant-test-1234567890' }),
+    });
+
+    const res = await app.request('/v1/admin/llm-providers', {
+      headers: ADMIN_HEADERS,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      providers: Array<{ provider: string; updatedAt: string }>;
+    };
+    const names = body.providers.map((p) => p.provider).sort();
+    expect(names).toEqual(['anthropic', 'openai']);
+  });
+
+  it('GET does NOT list other tenants\' keys', async () => {
+    // Tenant A sets a key; tenant B's listing must be empty.
+    await app.request('/v1/admin/llm-providers/openai/key', {
+      method: 'PUT',
+      headers: { ...ADMIN_HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'sk-tenant-A-key-1234567890' }),
+    });
+
+    const tenantBHeaders = {
+      'x-tenant-id': TENANT_B,
+      'x-user-id': USER,
+      'x-user-role': 'admin',
+    };
+    const res = await app.request('/v1/admin/llm-providers', {
+      headers: tenantBHeaders,
+    });
+    const body = (await res.json()) as {
+      providers: Array<{ provider: string }>;
+    };
+    expect(body.providers).toEqual([]);
+  });
+
+  it('DELETE removes the key', async () => {
+    await app.request('/v1/admin/llm-providers/openai/key', {
+      method: 'PUT',
+      headers: { ...ADMIN_HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'sk-temp-1234567890' }),
+    });
+    const del = await app.request('/v1/admin/llm-providers/openai/key', {
+      method: 'DELETE',
+      headers: ADMIN_HEADERS,
+    });
+    expect(del.status).toBe(200);
+
+    const after = await app.request('/v1/admin/llm-providers', {
+      headers: ADMIN_HEADERS,
+    });
+    const body = (await after.json()) as { providers: unknown[] };
+    expect(body.providers).toEqual([]);
+  });
+
+  it('DELETE is idempotent — 200 even if no key was set', async () => {
+    const res = await app.request('/v1/admin/llm-providers/openai/key', {
+      method: 'DELETE',
+      headers: ADMIN_HEADERS,
+    });
+    expect(res.status).toBe(200);
+  });
+});

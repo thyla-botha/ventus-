@@ -10,7 +10,11 @@ import {
   type ScrubReport,
 } from '@ventus/credentials';
 import { hashPayload } from '@ventus/audit';
-import { isConnectorType, type ConnectorType } from '@ventus/credentials';
+import {
+  isConnectorType,
+  isLLMProviderCredentialKind,
+  type ConnectorType,
+} from '@ventus/credentials';
 import type { AuditStore } from '@ventus/store';
 import type { ForwarderRegistry } from './forwarder.js';
 
@@ -48,9 +52,19 @@ function mergeScrubReports(a: ScrubReport, b: ScrubReport): ScrubReport {
 //      effort — if the outcome write itself fails the intent is left as
 //      an orphan, surfaced by the audit_trail reconciliation worker.
 
-const ConnectorEnum = z.string().refine(isConnectorType, {
-  message: 'unsupported connector type',
-});
+// Tool-call connectors must be forwarder-backed (gmail, slack, etc.). The
+// credential store also holds 'llm_*' kinds for per-tenant LLM provider
+// API keys, but those are NOT tool-call targets — reject them here so a
+// caller can't accidentally (or maliciously) make a 'tool-call' to a
+// provider key and get a confusing 'no forwarder' error six steps deeper.
+const ConnectorEnum = z
+  .string()
+  .refine((s) => !isLLMProviderCredentialKind(s), {
+    message: 'llm provider keys are not tool-call targets',
+  })
+  .refine(isConnectorType, {
+    message: 'unsupported connector type',
+  });
 
 const ToolCallSchema = z
   .object({

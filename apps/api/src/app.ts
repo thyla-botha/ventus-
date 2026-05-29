@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { logger } from 'hono/logger';
 import { tenantContext } from './middleware/tenant.js';
 import { admin } from './routes/admin.js';
+import { googleOAuthCallback, googleOAuthStart } from './routes/google-oauth.js';
 import { health } from './routes/health.js';
 import { proposals } from './routes/proposals.js';
 import { audit } from './routes/audit.js';
@@ -27,6 +28,12 @@ export function createApp(): Hono {
   // override must not churn the profile body's contentHash).
   app.route('/v1/tenant', tenantProfile);
   app.route('/v1/admin', admin);
+  // Gmail OAuth onboarding. /start needs the tenant gate (admin-only,
+  // signs the state token for the caller's tenantId); /callback runs
+  // OUTSIDE /v1 because Google can't carry our Authorization header and
+  // we identify the tenant from the signed state instead.
+  app.route('/v1/auth/google', googleOAuthStart);
+  app.route('/auth/google', googleOAuthCallback);
   return app;
 }
 

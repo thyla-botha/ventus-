@@ -24,6 +24,7 @@
     "@ventus/skills": "workspace:*",
     "@ventus/store": "workspace:*",
     "@ventus/worker": "workspace:*",
+    "googleapis": "^144.0.0",
     "hono": "^4.6.0",
     "jose": "^6.2.3",
     "zod": "^3.23.0"

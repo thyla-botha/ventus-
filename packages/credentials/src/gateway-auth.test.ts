@@ -436,6 +436,43 @@ describe('signGatewayRequest + verifyGatewayRequest', () => {
       expect(store.sizeForTests()).toBe(0);
     });
 
+    it('rejects a replay at exactly timestamp + SKEW_SECONDS (off-by-one follow-up)', () => {
+      // Boundary case the adversarial review flagged: the skew gate uses
+      // strict `>` so a verify at `now === timestamp + SKEW_SECONDS` is
+      // still accepted. If retention is set to exactly that value, the
+      // store's lazy purge (`exp <= now`) evicts the row at the same
+      // instant and the replay slips through. The fix extends retention
+      // by +1s; this test pins the behavior so the off-by-one cannot
+      // silently regress.
+      const t = 1000;
+      const store = new InMemoryNonceStore();
+      const signed = signGatewayRequest({
+        method: 'POST',
+        path: '/x',
+        tenantId: TENANT_A,
+        body: '{}',
+        timestamp: t,
+      });
+      verifyGatewayRequest({
+        method: 'POST',
+        path: '/x',
+        body: '{}',
+        headers: signed,
+        now: () => t,
+        nonceStore: store,
+      });
+      expect(() =>
+        verifyGatewayRequest({
+          method: 'POST',
+          path: '/x',
+          body: '{}',
+          headers: signed,
+          now: () => t + 60,
+          nonceStore: store,
+        }),
+      ).toThrow(/nonce already used/);
+    });
+
     it('treats nonces from different tenants as distinct keys', () => {
       // A and B can hold the same nonce without collision — replay
       // protection is scoped to the signer's tenant. (If both used the

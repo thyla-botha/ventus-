@@ -96,12 +96,27 @@ export class AnthropicRuntime implements AgentRuntime {
         return;
       }
 
+      // Anthropic reports the three token classes as mutually exclusive
+      // counts: `input_tokens` is the NON-cached portion only, while
+      // `cache_read_input_tokens` and `cache_creation_input_tokens` are
+      // SEPARATE totals. The platform-wide `usageToMicros` was written
+      // around the OpenAI convention (`prompt_tokens` is the GRAND TOTAL
+      // including cache portions, with cache_read/cache_creation as
+      // subsets). Roll the Anthropic counts up so the cost calculator
+      // gets the input it was designed for: a true grand total to
+      // subtract from, with the cache subsets billed at their own rates.
+      // Without this rollup, cached prompts under-bill the regular input
+      // (it gets clamped to 0 when cache totals exceed input_tokens).
       const usageRaw = response.usage as UsageWithCache;
+      const cacheReadInputTokens = usageRaw.cache_read_input_tokens ?? 0;
+      const cacheCreationInputTokens = usageRaw.cache_creation_input_tokens ?? 0;
+      const inputTokensForBilling =
+        usageRaw.input_tokens + cacheReadInputTokens + cacheCreationInputTokens;
       const usage: TokenUsage = {
-        inputTokens: usageRaw.input_tokens,
+        inputTokens: inputTokensForBilling,
         outputTokens: usageRaw.output_tokens,
-        cacheReadInputTokens: usageRaw.cache_read_input_tokens ?? undefined,
-        cacheCreationInputTokens: usageRaw.cache_creation_input_tokens ?? undefined,
+        ...(cacheReadInputTokens > 0 ? { cacheReadInputTokens } : {}),
+        ...(cacheCreationInputTokens > 0 ? { cacheCreationInputTokens } : {}),
       };
       const costMicros = usageToMicros(input.model, usage);
       totalCostMicros += costMicros;

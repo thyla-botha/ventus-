@@ -152,9 +152,29 @@ export abstract class OpenAICompatibleRuntime implements AgentRuntime {
         };
         return;
       }
+      // Prompt-cache split. When the provider's response includes
+      // `prompt_tokens_details.cached_tokens` (gpt-4o cached prompts,
+      // OpenRouter passing through), those tokens were a cache READ —
+      // bill them at the cache-read rate (~10% of input) instead of the
+      // full input rate. The OpenAI convention is that `prompt_tokens`
+      // is the TOTAL input including cached portions, so usageToMicros
+      // subtracts the cached count from inputTokens before billing the
+      // remainder at input rate. Skip the field when malformed; missing
+      // cache info is "no cache used", not "stop the run". Skip when not
+      // a safe integer — defence in depth same as prompt_tokens itself.
+      const promptDetails = (usageRaw as { prompt_tokens_details?: unknown })
+        .prompt_tokens_details;
+      let cacheReadInputTokens: number | undefined;
+      if (promptDetails && typeof promptDetails === 'object') {
+        const cached = (promptDetails as { cached_tokens?: unknown }).cached_tokens;
+        if (typeof cached === 'number' && isSafeTokenCount(cached) && cached > 0) {
+          cacheReadInputTokens = cached;
+        }
+      }
       const usage: TokenUsage = {
         inputTokens: usageRaw.prompt_tokens,
         outputTokens: usageRaw.completion_tokens,
+        ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
       };
       const costMicros = this.computeCostMicros(input.model, usage);
       totalCostMicros += costMicros;

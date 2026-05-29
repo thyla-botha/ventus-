@@ -15,7 +15,11 @@ type CompletionResult = {
     };
     finish_reason: 'stop' | 'tool_calls' | 'length' | 'content_filter' | string;
   }>;
-  usage?: { prompt_tokens: number; completion_tokens: number };
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
 };
 
 function makeRuntime(scriptedResponses: CompletionResult[]): {
@@ -334,6 +338,115 @@ describe('OpenAIRuntime', () => {
             project: 'proj\r\nX-Inject: yes',
           }),
       ).toThrow(/control or line-separator characters/);
+    });
+  });
+
+  describe('prompt-cache cost accounting (PR 3/6)', () => {
+    // OpenAI / OpenRouter cached prompts: when a tenant reuses a long
+    // system prompt across runs, the API reports the cached portion via
+    // `usage.prompt_tokens_details.cached_tokens`. Those tokens were a
+    // CACHE READ, billed at ~10% of input rate (gpt-4o-mini: 0.075 vs
+    // 0.15 micros/token). Treating them as regular input over-bills the
+    // tenant and trips the cost ceiling earlier than reality.
+    it('extracts cached_tokens from prompt_tokens_details and bills at cache-read rate', async () => {
+      const { runtime } = makeRuntime([
+        {
+          choices: [
+            {
+              message: { role: 'assistant', content: 'cached hello' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: {
+            prompt_tokens: 1000,
+            completion_tokens: 50,
+            prompt_tokens_details: { cached_tokens: 800 },
+          },
+        },
+      ]);
+      const events = await collect(runtime.run(baseInput({ model: 'gpt-4o-mini' })));
+      const completed = events.find((e) => e.type === 'completed') as {
+        totalCostMicros: number;
+      };
+      // gpt-4o-mini pricing (from PR 1):
+      //   input:        0.15 micros/token
+      //   output:       0.6  micros/token
+      //   cacheRead:    0.075 micros/token
+      // usage: prompt_tokens=1000 total, cached_tokens=800 → raw input = 200
+      // cost: 200*0.15 + 50*0.6 + 800*0.075 = 30 + 30 + 60 = 120 micros
+      expect(completed.totalCostMicros).toBe(120);
+    });
+
+    it('falls back to standard input billing when prompt_tokens_details is absent', async () => {
+      const { runtime } = makeRuntime([
+        {
+          choices: [
+            {
+              message: { role: 'assistant', content: 'no cache' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 1000, completion_tokens: 50 },
+        },
+      ]);
+      const events = await collect(runtime.run(baseInput({ model: 'gpt-4o-mini' })));
+      const completed = events.find((e) => e.type === 'completed') as {
+        totalCostMicros: number;
+      };
+      // No cache → 1000*0.15 + 50*0.6 = 150 + 30 = 180 micros
+      expect(completed.totalCostMicros).toBe(180);
+    });
+
+    it('ignores cached_tokens when it is zero (no cache hit)', async () => {
+      const { runtime } = makeRuntime([
+        {
+          choices: [
+            {
+              message: { role: 'assistant', content: 'cold prompt' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: {
+            prompt_tokens: 1000,
+            completion_tokens: 50,
+            prompt_tokens_details: { cached_tokens: 0 },
+          },
+        },
+      ]);
+      const events = await collect(runtime.run(baseInput({ model: 'gpt-4o-mini' })));
+      const completed = events.find((e) => e.type === 'completed') as {
+        totalCostMicros: number;
+      };
+      // Same as no-details case: 1000*0.15 + 50*0.6 = 180
+      expect(completed.totalCostMicros).toBe(180);
+    });
+
+    it('ignores cached_tokens when malformed (NaN / negative / Infinity)', async () => {
+      for (const bad of [Number.NaN, -100, Number.POSITIVE_INFINITY, 1.5]) {
+        const { runtime } = makeRuntime([
+          {
+            choices: [
+              {
+                message: { role: 'assistant', content: 'bad cache field' },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: {
+              prompt_tokens: 1000,
+              completion_tokens: 50,
+              prompt_tokens_details: { cached_tokens: bad },
+            },
+          },
+        ]);
+        const events = await collect(
+          runtime.run(baseInput({ model: 'gpt-4o-mini' })),
+        );
+        const completed = events.find((e) => e.type === 'completed') as {
+          totalCostMicros: number;
+        };
+        // Malformed → ignore the field, bill as if no cache (180 micros).
+        expect(completed.totalCostMicros).toBe(180);
+      }
     });
   });
 });

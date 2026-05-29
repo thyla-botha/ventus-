@@ -406,6 +406,40 @@ describe('POST /v1/tool-call — codex review fixes', () => {
     expect(trail[0]!.outcome?.status).toBe('executed');
   });
 
+  it('does NOT log raw OAuth tokens from forwarder errors to stdout (ship-blocker #1)', async () => {
+    // Provider SDKs routinely embed Authorization: Bearer ya29... in
+    // err.message. console.error fires before scrub would write that
+    // verbatim to CloudWatch/Datadog — persistent storage in compliance
+    // scope. The fix: scrub first, then log. The 'forwarder threw'
+    // marker must remain so operators can still find the diagnostic.
+    await creds.set(TENANT_A, 'gmail', 'token');
+    const leakyForwarder: ToolForwarder = {
+      connectorType: 'gmail',
+      async forward() {
+        throw new Error('gmail 401: Bearer ya29.STDOUT_LEAK_SECRET_xyz789 expired');
+      },
+    };
+    const app = makeApp(leakyForwarder);
+    const captured: string[] = [];
+    const realConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      captured.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+    };
+    try {
+      const res = await signedFetch(app, TENANT_A, {
+        connector: 'gmail',
+        tool: 'send',
+        input: {},
+      });
+      expect(res.status).toBe(502);
+      const joined = captured.join('\n');
+      expect(joined).toContain('[mcp-gateway] forwarder threw:');
+      expect(joined).not.toContain('ya29.STDOUT_LEAK_SECRET_xyz789');
+    } finally {
+      console.error = realConsoleError;
+    }
+  });
+
   it('does NOT leak forwarder error text to the response body (CODEX HIGH-6)', async () => {
     // Pre-fix bug: forwarder.message (e.g. "401 Unauthorized url=https://gmail.googleapis.com/... auth=Bearer ya29.SECRET")
     // was returned in the JSON response, which the agent loop appends as

@@ -183,17 +183,17 @@ export function createGatewayApp(deps: GatewayDeps): Hono {
       });
     } catch (err) {
       // CODEX HIGH-6: forwarder exception text may contain URLs, request
-      // headers, OAuth tokens, or other tenant data. Log the full text
-      // server-side for forensics; store a scrubbed copy in audit so the
-      // PII rules apply to errors too; return a generic message to the
-      // caller so the agent's tool-result block never carries raw bytes
-      // back into the next LLM prompt.
+      // headers, OAuth tokens, or other tenant data. Scrub FIRST so stdout
+      // (CloudWatch/Datadog persistent storage) never sees raw Bearer
+      // tokens or PII; store the same scrubbed copy in audit; return a
+      // generic message to the caller so the agent's tool-result block
+      // never carries raw bytes back into the next LLM prompt.
       const rawErrorText = err instanceof Error ? err.message : String(err);
-      // eslint-disable-next-line no-console
-      console.error('[mcp-gateway] forwarder threw:', rawErrorText);
       const { value: scrubbedError } = scrub(rawErrorText);
       const auditedErrorText =
         typeof scrubbedError === 'string' ? scrubbedError : rawErrorText;
+      // eslint-disable-next-line no-console
+      console.error('[mcp-gateway] forwarder threw:', auditedErrorText);
       try {
         await deps.audit.recordOutcome({
           intentId: intent.id,
@@ -235,10 +235,17 @@ export function createGatewayApp(deps: GatewayDeps): Hono {
         durationMs: Date.now() - startedAt,
       });
     } catch (err) {
+      // Scrub before logging — audit store errors can wrap raw payload
+      // bytes (driver messages, JSON snippets) that may still carry
+      // tenant tokens or PII; stdout is persistent storage in scope.
+      const rawErrorText = err instanceof Error ? err.message : String(err);
+      const { value: scrubbedError } = scrub(rawErrorText);
+      const auditedErrorText =
+        typeof scrubbedError === 'string' ? scrubbedError : rawErrorText;
       // eslint-disable-next-line no-console
       console.error(
         '[mcp-gateway] outcome write FAILED on success path; intent orphaned:',
-        err instanceof Error ? err.message : String(err),
+        auditedErrorText,
         { intentId: intent.id, tenantId: verified.tenantId },
       );
       return c.json(
